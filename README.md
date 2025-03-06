@@ -32,7 +32,9 @@ The installation includes:
 
 
 Usage: ./one-click-install.sh [-p PART] [--dns DNS_NAME] [--runai-version VERSION] [--repo-secret FILE] [--knative] [--internal-dns] [--ip IP_ADDRESS] [--runai-only] [--cert CERT_FILE] [--key KEY_FILE]
--p PART Specify which part to run (1, 2, 3, or 4)
+
+
+Options:
 --dns DNS_NAME Specify DNS name for Run.ai certificates
 --runai-version VER Specify Run.ai version to install
 --repo-secret FILE Optional: Specify repository secret file location
