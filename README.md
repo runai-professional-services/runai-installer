@@ -86,5 +86,4 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## 🙏 Acknowledgements
 
-- Run.ai team for their excellent platform
-- Kubernetes community for the robust container orchestration system 
+- Script is maintained by Erez Kirson - ekirson@nvidia.com
