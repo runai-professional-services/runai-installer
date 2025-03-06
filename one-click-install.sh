@@ -28,9 +28,6 @@ echo -e "\033[0m"  # Reset text formatting
 echo -e "\n\033[33mPress Enter to continue...\033[0m"
 read
 
-# Add at the top of the script, after the initial variable declarations
-PART3_EXECUTED=false
-
 # Variables for internal DNS
 INTERNAL_DNS=false
 FQDN=""
@@ -43,8 +40,7 @@ KEY_FILE=""
 
 # Function to show usage
 show_usage() {
-    echo "Usage: $0 [-p PART] [--dns DNS_NAME] [--runai-version VERSION] [--repo-secret FILE] [--knative] [--internal-dns] [--ip IP_ADDRESS] [--runai-only] [--cert CERT_FILE] [--key KEY_FILE]"
-    echo "  -p PART                Specify which part to run (1, 2, 3, or 4)"
+    echo "Usage: $0 [--dns DNS_NAME] [--runai-version VERSION] [--repo-secret FILE] [--knative] [--internal-dns] [--ip IP_ADDRESS] [--runai-only] [--cert CERT_FILE] [--key KEY_FILE]"
     echo "  --dns DNS_NAME         Specify DNS name for Run.ai certificates"
     echo "  --runai-version VER    Specify Run.ai version to install"
     echo "  --repo-secret FILE     Optional: Specify repository secret file location"
@@ -56,16 +52,16 @@ show_usage() {
     echo "  --key KEY_FILE         Optional: Use provided key file instead of generating self-signed"
     echo ""
     echo "Examples:"
-    echo "  $0 -p 1 --dns runai.kirson.lab --ip 172.21.140.20  # Run only part 1 with specified DNS and IP"
-    echo "  $0 --dns runai.kirson.lab --internal-dns --ip 172.21.140.20  # Run all parts with internal DNS"
+    echo "  $0 --dns runai.kirson.lab --ip 172.21.140.20  # Run full installation with specified DNS and IP"
+    echo "  $0 --dns runai.kirson.lab --internal-dns --ip 172.21.140.20  # Run with internal DNS"
     echo "  $0 --dns runai.kirson.lab --runai-version 2.5.0 --runai-only  # Install only Run.ai without prerequisites"
     echo "  $0 --dns runai.kirson.lab --runai-version 2.5.0 --cert /path/to/cert.pem --key /path/to/key.pem  # Use provided certificates"
     exit 1
 }
 
-# Function for Part 1: Kubespray installation
-run_part1() {
-    echo "Running Part 1: Kubespray installation"
+# Function to install Kubernetes and prerequisites
+install_kubernetes() {
+    echo "Starting Kubernetes installation..."
     
     # Check and install jq
     if ! command -v jq &> /dev/null; then
@@ -313,7 +309,6 @@ EOF
             fi
             
             echo "✅ Kubernetes cluster installation completed successfully!"
-            PART3_EXECUTED=true  # Set the flag after successful installation
 
             # Patch local-path-config ConfigMap
             echo "Patching local-path-config ConfigMap..."
@@ -331,9 +326,7 @@ EOF
             '
             
             echo "✅ Local Path Storage configured successfully!"
-            
-            # Continue to Run.ai installation
-            run_part4
+            return 0
         else
             echo "❌ Failed to configure kubectl"
             exit 1
@@ -344,98 +337,9 @@ EOF
     fi
 }
 
-# Function for Part 2: Storage setup
-run_part2() {
-    echo "Running Part 2: Storage setup"
-    # Storage setup logic here
-}
-
-# Function for Part 3: Kubernetes installation
-run_part3() {
-    echo "Running Part 3: Kubernetes installation"
-    # Kubernetes installation logic here
-}
-
-# Function for Part 4: Run.ai installation
-run_part4() {
-    echo "Running Part 4: Run.ai installation"
-    # Run.ai installation logic here
-}
-
-# Function to install Knative
-install_knative() {
-    echo "Installing Knative (optional component)..."
-    if ! kubectl apply -f https://github.com/knative/serving/releases/download/knative-v1.17.0/serving-crds.yaml > /dev/null 2>&1; then
-        echo "⚠️ Warning: Failed to install Knative CRDs, continuing..."
-    fi
-    
-    if ! kubectl apply -f https://github.com/knative/serving/releases/download/knative-v1.17.0/serving-core.yaml > /dev/null 2>&1; then
-        echo "⚠️ Warning: Failed to install Knative Core, continuing..."
-    fi
-    
-    if ! kubectl apply -f https://github.com/knative/net-kourier/releases/download/knative-v1.17.0/kourier.yaml > /dev/null 2>&1; then
-        echo "⚠️ Warning: Failed to install Knative Kourier, continuing..."
-    fi
-    
-    if ! kubectl patch configmap/config-network \
-        --namespace knative-serving \
-        --type merge \
-        --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}' > /dev/null 2>&1; then
-        echo "⚠️ Warning: Failed to configure Knative network, continuing..."
-    fi
-    
-    echo "✅ Knative installation completed!"
-}
-
-# Function to patch CoreDNS for internal DNS
-patch_coredns() {
-    echo "[INFO] Patching CoreDNS to add internal DNS entry for $FQDN -> $IP"
-    
-    # Get the current CoreDNS ConfigMap
-    kubectl -n kube-system get configmap coredns -o yaml > coredns-configmap.yaml
-    
-    # Update the ConfigMap with the new hosts entry
-    kubectl -n kube-system patch configmap coredns --type='merge' --patch="
-    data:
-      Corefile: |
-        .:53 {
-            errors
-            health {
-              lameduck 5s
-            }
-            ready
-            kubernetes cluster.local in-addr.arpa ip6.arpa {
-              pods insecure
-              fallthrough in-addr.arpa ip6.arpa
-            }
-            prometheus :9153
-            forward . /etc/resolv.conf {
-              prefer_udp
-              max_concurrent 1000
-            }
-            cache 30
-
-            loop
-            reload
-            loadbalance
-
-            hosts $FQDN {
-              $IP $FQDN
-              fallthrough
-            }
-        }
-    "
-
-    # Restart CoreDNS to apply the changes
-    echo "[INFO] Restarting CoreDNS..."
-    kubectl -n kube-system delete pod -l k8s-app=kube-dns
-
-    echo "[SUCCESS] CoreDNS updated with $FQDN -> $IP"
-}
-
-# Function for Run.ai only installation
-run_runai_only() {
-    echo "Running Run.ai only installation..."
+# Function to install Run.ai
+install_runai() {
+    echo "Installing Run.ai..."
     
     # Create certificates directory
     CERT_DIR="./certificates"
@@ -690,8 +594,78 @@ EOF
     echo "✅ Run.ai installation completed successfully!"
 }
 
+# Function to install Knative
+install_knative() {
+    echo "Installing Knative (optional component)..."
+    if ! kubectl apply -f https://github.com/knative/serving/releases/download/knative-v1.17.0/serving-crds.yaml > /dev/null 2>&1; then
+        echo "⚠️ Warning: Failed to install Knative CRDs, continuing..."
+    fi
+    
+    if ! kubectl apply -f https://github.com/knative/serving/releases/download/knative-v1.17.0/serving-core.yaml > /dev/null 2>&1; then
+        echo "⚠️ Warning: Failed to install Knative Core, continuing..."
+    fi
+    
+    if ! kubectl apply -f https://github.com/knative/net-kourier/releases/download/knative-v1.17.0/kourier.yaml > /dev/null 2>&1; then
+        echo "⚠️ Warning: Failed to install Knative Kourier, continuing..."
+    fi
+    
+    if ! kubectl patch configmap/config-network \
+        --namespace knative-serving \
+        --type merge \
+        --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}' > /dev/null 2>&1; then
+        echo "⚠️ Warning: Failed to configure Knative network, continuing..."
+    fi
+    
+    echo "✅ Knative installation completed!"
+}
+
+# Function to patch CoreDNS for internal DNS
+patch_coredns() {
+    echo "[INFO] Patching CoreDNS to add internal DNS entry for $FQDN -> $IP"
+    
+    # Get the current CoreDNS ConfigMap
+    kubectl -n kube-system get configmap coredns -o yaml > coredns-configmap.yaml
+    
+    # Update the ConfigMap with the new hosts entry
+    kubectl -n kube-system patch configmap coredns --type='merge' --patch="
+    data:
+      Corefile: |
+        .:53 {
+            errors
+            health {
+              lameduck 5s
+            }
+            ready
+            kubernetes cluster.local in-addr.arpa ip6.arpa {
+              pods insecure
+              fallthrough in-addr.arpa ip6.arpa
+            }
+            prometheus :9153
+            forward . /etc/resolv.conf {
+              prefer_udp
+              max_concurrent 1000
+            }
+            cache 30
+
+            loop
+            reload
+            loadbalance
+
+            hosts $FQDN {
+              $IP $FQDN
+              fallthrough
+            }
+        }
+    "
+
+    # Restart CoreDNS to apply the changes
+    echo "[INFO] Restarting CoreDNS..."
+    kubectl -n kube-system delete pod -l k8s-app=kube-dns
+
+    echo "[SUCCESS] CoreDNS updated with $FQDN -> $IP"
+}
+
 # Parse arguments
-PART=""
 DNS_NAME=""
 RUNAI_VERSION=""
 REPO_SECRET=""
@@ -699,14 +673,6 @@ KNATIVE_INSTALL=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -p)
-            PART="$2"
-            if [[ ! $PART =~ ^[1-4]$ ]]; then
-                echo "Invalid part number: $PART"
-                show_usage
-            fi
-            shift 2
-            ;;
         --dns)
             DNS_NAME="$2"
             shift 2
@@ -755,6 +721,10 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        -p)
+            # Ignore the -p parameter for backward compatibility
+            shift 2
+            ;;
         *)
             echo "Unknown option: $1"
             show_usage
@@ -762,22 +732,45 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Call the appropriate function based on the selected part
-case $PART in
-    1)
-        run_part1
-        ;;
-    2)
-        run_part2
-        ;;
-    3)
-        run_part3
-        ;;
-    4)
-        run_part4
-        ;;
-    *)
-        echo "Invalid part number: $PART"
-        show_usage
-        ;;
-esac 
+# Validate required parameters
+if [ -z "$DNS_NAME" ]; then
+    echo "❌ DNS name is required. Please specify with --dns parameter."
+    show_usage
+fi
+
+if [ -z "$RUNAI_VERSION" ]; then
+    echo "❌ Run.ai version is required. Please specify with --runai-version parameter."
+    show_usage
+fi
+
+if [ "$INTERNAL_DNS" = true ] && [ -z "$IP" ]; then
+    echo "❌ IP address is required when using --internal-dns. Please specify with --ip parameter."
+    show_usage
+fi
+
+# Set FQDN for internal DNS
+FQDN=$DNS_NAME
+
+# Main installation flow
+if [ "$RUNAI_ONLY" = true ]; then
+    echo "Performing Run.ai-only installation..."
+    install_runai
+else
+    echo "Performing full installation..."
+    install_kubernetes
+    install_runai
+fi
+
+# Install Knative if requested
+if [ "$KNATIVE_INSTALL" = true ]; then
+    install_knative
+fi
+
+echo "============================================"
+echo "      Installation completed successfully!  "
+echo "============================================"
+echo ""
+echo "Access your Run.ai dashboard at: https://$DNS_NAME"
+echo "Default credentials: test@run.ai / Abcd!234"
+echo ""
+echo "Please copy certificates/rootCA.pem to your browser or laptop for secure access." 
