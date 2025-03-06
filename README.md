@@ -37,7 +37,7 @@ Usage: ./one-click-install.sh [-p PART] [--dns DNS_NAME] [--runai-version VERSIO
 Options:
 --dns DNS_NAME Specify DNS name for Run.ai certificates
 
---runai-version VER Specify Run.ai version to install
+--runai-version  Specify Run.ai version to install
 
 --repo-secret FILE Optional: Specify repository secret file location
 
