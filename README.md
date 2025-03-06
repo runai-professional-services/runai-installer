@@ -36,14 +36,23 @@ Usage: ./one-click-install.sh [-p PART] [--dns DNS_NAME] [--runai-version VERSIO
 
 Options:
 --dns DNS_NAME Specify DNS name for Run.ai certificates
+
 --runai-version VER Specify Run.ai version to install
+
 --repo-secret FILE Optional: Specify repository secret file location
+
 --knative Optional: Install Knative serving
+
 --internal-dns Optional: Configure internal DNS
+
 --ip IP_ADDRESS Required if --internal-dns is set: Specify IP address for internal DNS
+
 --runai-only Optional: Skip prerequisites and directly install Run.ai
+
 --cert CERT_FILE Optional: Use provided certificate file instead of generating self-signed
+
 --key KEY_FILE Optional: Use provided key file instead of generating self-signed
+
 
 
 
