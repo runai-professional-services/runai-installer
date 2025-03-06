@@ -24,15 +24,15 @@ The AI Factory One-Click Installer is a powerful bash script that automates the 
 
 ### Installation with internal DNS configuration
 
-./one-click-installer.sh --dns runai.example.com --internal-dns --ip 172.21.140.20 --runai-version 2.20.22
+one-click-installer.sh --dns runai.example.com --internal-dns --ip 172.21.140.20 --runai-version 2.20.22
 
 ### Installation with custom certificates
 
-./one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem
+one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem
 
 ### Full installation with all optional components
 
-./one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --nginx --prometheus --gpu-operator --knative --internal-dns
+one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --nginx --prometheus --gpu-operator --knative --internal-dns
 
 ## 📋 Options
 
