@@ -855,4 +855,4 @@ echo -e "${GREEN}║              Installation Completed Successfully!          
 echo -e "${GREEN}║                                                                       ║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
 echo -e "\n${BLUE}You can access Run.ai at: ${GREEN}https://$DNS_NAME${NC}"
-echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / Abcd!234${NC}\n"
+echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / {NC}\n"
