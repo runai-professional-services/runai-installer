@@ -18,6 +18,7 @@ The AI Factory One-Click Installer is a powerful bash script that automates the 
 - 📊 **Monitoring**: Optional Prometheus Stack installation
 - 🖥️ **GPU Support**: Optional NVIDIA GPU Operator installation
 - 🚀 **Serverless**: Optional Knative serving installation
+- 🔧 **BCM Integration**: Optional Bright Cluster Manager configuration
 
 ## 🚀 Quick Start
 
@@ -57,6 +58,7 @@ one-click-installer.sh --dns www.192.168.0.1.sslip.io  --runai-version 2.20.22 -
 | `--prometheus` | Install Prometheus Stack |
 | `--gpu-operator` | Install NVIDIA GPU Operator |
 | `--repo-secret FILE` | Specify repository secret file location |
+| `--bcm` | Configure Bright Cluster Manager for Run.ai access |
 
 ## 🔍 Prerequisites
 
