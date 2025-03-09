@@ -24,6 +24,7 @@ show_usage() {
     echo "  --prometheus           Install Prometheus Stack"
     echo "  --gpu-operator         Install NVIDIA GPU Operator"
     echo "  --repo-secret FILE     Specify repository secret file location"
+    echo "  --BCM                  Configure Bright Cluster Manager for Run.ai access"
     echo ""
     echo "Examples:"
     echo "  $0 --dns runai.kirson.lab --runai-version 2.20.22"
@@ -49,6 +50,8 @@ INSTALL_PROMETHEUS=false
 INSTALL_GPU_OPERATOR=false
 PATCH_NGINX=false
 REPO_SECRET=""
+BCM_CONFIG=false
+TEMP_DIR="/tmp"
 
 # Add at the beginning of the script
 CURRENT_OPERATION="Starting installation"
@@ -120,6 +123,10 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --BCM)
+            BCM_CONFIG=true
+            shift
+            ;;
         -h|--help)
             show_usage
             ;;
@@ -167,26 +174,19 @@ cat << "EOF"
 EOF
 echo -e "${NC}"
 
-echo -e "${BLUE}Installation Summary:${NC}"
-echo -e "${YELLOW}------------------${NC}"
-echo -e "DNS Name: ${GREEN}$DNS_NAME${NC}"
-echo -e "Run.ai Version: ${GREEN}$RUNAI_VERSION${NC}"
-echo -e "Run.ai Only: ${GREEN}$([ "$RUNAI_ONLY" = true ] && echo "Yes" || echo "No")${NC}"
-echo -e "Internal DNS: ${GREEN}$([ "$INTERNAL_DNS" = true ] && echo "Yes" || echo "No")${NC}"
-if [ "$INTERNAL_DNS" = true ]; then
-    echo -e "IP Address: ${GREEN}$IP_ADDRESS${NC}"
-fi
-echo -e "Install Nginx: ${GREEN}$([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No")${NC}"
-echo -e "Patch Nginx: ${GREEN}$([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")${NC}"
-echo -e "Install Prometheus: ${GREEN}$([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")${NC}"
-echo -e "Install GPU Operator: ${GREEN}$([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")${NC}"
-echo -e "Install Knative: ${GREEN}$([ "$INSTALL_KNATIVE" = true ] && echo "Yes" || echo "No")${NC}"
-echo -e "Custom Certificates: ${GREEN}$([ -n "$CERT_FILE" ] && echo "Yes" || echo "No")${NC}"
-if [ -n "$CERT_FILE" ]; then
-    echo -e "Certificate File: ${GREEN}$CERT_FILE${NC}"
-    echo -e "Key File: ${GREEN}$KEY_FILE${NC}"
-fi
-echo -e "Repository Secret: ${GREEN}$([ -n "$REPO_SECRET" ] && echo "$REPO_SECRET" || echo "None")${NC}"
+echo -e "${BLUE}Configuration:${NC}"
+echo -e "DNS Name: $DNS_NAME"
+echo -e "Run.ai Version: $RUNAI_VERSION"
+echo -e "Run.ai Only: $([ "$RUNAI_ONLY" = true ] && echo "Yes" || echo "No")"
+echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Nginx: $([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No")"
+echo -e "Patch Nginx: $([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Prometheus: $([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")"
+echo -e "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Knative: $([ "$INSTALL_KNATIVE" = true ] && echo "Yes" || echo "No")"
+echo -e "Custom Certificates: $([ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && echo "Yes" || echo "No")"
+echo -e "Repository Secret: $([ -n "$REPO_SECRET" ] && echo "$REPO_SECRET" || echo "None")"
+echo -e "BCM Configuration: $([ "$BCM_CONFIG" = true ] && echo "Yes" || echo "No")"
 
 echo -e "\n${BLUE}Starting installation...${NC}"
 
@@ -793,6 +793,81 @@ update_local_hosts() {
     fi
 }
 
+# Function to configure Bright Cluster Manager
+configure_bcm() {
+    echo -e "${BLUE}Configuring Bright Cluster Manager for Run.ai access...${NC}"
+    
+    # Step 1: Get the HTTPS port from ingress-nginx-controller
+    echo -e "${BLUE}Getting HTTPS port from ingress-nginx-controller...${NC}"
+    local nginx_ports=$(kubectl -n ingress-nginx get svc ingress-nginx-controller -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}')
+    
+    if [ -z "$nginx_ports" ]; then
+        echo -e "${RED}❌ Error: Could not find HTTPS nodePort in ingress-nginx-controller${NC}"
+        return 1
+    fi
+    
+    local https_port=$nginx_ports
+    echo -e "${GREEN}✅ Found HTTPS nodePort: $https_port${NC}"
+    
+    # Step 2: Get the last node name from kubectl get nodes
+    echo -e "${BLUE}Getting the last worker node name...${NC}"
+    local last_node=$(kubectl get nodes --sort-by=.metadata.name -o jsonpath='{.items[-1:].metadata.name}')
+    
+    if [ -z "$last_node" ]; then
+        echo -e "${RED}❌ Error: Could not find any nodes in the cluster${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✅ Found last node: $last_node${NC}"
+    
+    # Step 3: Verify the node exists in Bright Cluster Manager
+    echo -e "${BLUE}Verifying node exists in Bright Cluster Manager...${NC}"
+    if ! cmsh -c "device list" | grep -q "$last_node"; then
+        echo -e "${RED}❌ Error: Node $last_node not found in Bright Cluster Manager${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✅ Node $last_node found in Bright Cluster Manager${NC}"
+    
+    # Step 4: Configure nginx reverse proxy in Bright Cluster Manager
+    echo -e "${BLUE}Configuring nginx reverse proxy in Bright Cluster Manager...${NC}"
+    local headnode=$(cmsh -c "device list" | grep -i headnode | awk '{print $2}')
+    
+    if [ -z "$headnode" ]; then
+        echo -e "${RED}❌ Error: Could not find headnode in Bright Cluster Manager${NC}"
+        return 1
+    fi
+    
+    echo -e "${BLUE}Using headnode: $headnode${NC}"
+    
+    # Create a temporary file with cmsh commands
+    local bcm_temp="$TEMP_DIR/bcm-temp"
+    cat > "$bcm_temp" << EOF
+device use $headnode
+roles
+use nginx
+nginxreverseproxy
+list
+add 443 $last_node $https_port '$DNS_NAME'
+commit
+EOF
+    
+    # Execute the cmsh commands from the file
+    if cmsh -q -x -f "$bcm_temp"; then
+        echo -e "${GREEN}✅ Successfully configured Bright Cluster Manager nginx reverse proxy${NC}"
+        echo -e "${GREEN}✅ Run.ai is now accessible via Bright Cluster Manager at https://$DNS_NAME${NC}"
+        
+        # Show the configured reverse proxy details
+        echo -e "${BLUE}Configured reverse proxy details:${NC}"
+        echo -e "${YELLOW}$(cmsh -c "device use $headnode; roles; use nginx; nginxreverseproxy; list" | grep -A 1 "$DNS_NAME")${NC}"
+        
+        return 0
+    else
+        echo -e "${RED}❌ Error: Failed to configure Bright Cluster Manager nginx reverse proxy${NC}"
+        return 1
+    fi
+}
+
 # Main execution
 # Check if Run.ai is already installed
 check_runai_installed
@@ -805,6 +880,15 @@ fi
 # Apply internal DNS patch if flag is set
 if [ "$INTERNAL_DNS" = true ]; then
     patch_coredns
+fi
+
+# Configure Bright Cluster Manager if flag is set
+if [ "$BCM_CONFIG" = true ]; then
+    if configure_bcm; then
+        echo -e "${GREEN}✅ Bright Cluster Manager configuration completed${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Warning: Failed to configure Bright Cluster Manager, continuing with installation${NC}"
+    fi
 fi
 
 # Patch Nginx if flag is set
@@ -855,4 +939,4 @@ echo -e "${GREEN}║              Installation Completed Successfully!          
 echo -e "${GREEN}║                                                                       ║${NC}"
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
 echo -e "\n${BLUE}You can access Run.ai at: ${GREEN}https://$DNS_NAME${NC}"
-echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / {NC}\n"
+echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / Abcd!234${NC}\n"
