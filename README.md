@@ -34,6 +34,12 @@ one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --cert /p
 
 one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --nginx --prometheus --gpu-operator --knative --internal-dns
 
+### Full installation with all optional components - use case without any DNS - www.192.168.0.1.sslip.io - example
+
+one-click-installer.sh --dns www.192.168.0.1.sslip.io  --runai-version 2.20.22 --nginx --prometheus --gpu-operator --knative --internal-dns
+
+
+
 ## 📋 Options
 
 | Option | Description |
