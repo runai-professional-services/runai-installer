@@ -853,7 +853,7 @@ roles
 use nginx
 nginxreverseproxy
 list
-add 443 $last_node $https_port '$DNS_NAME'
+add 443 $last_node $https_port 'runai'
 commit
 EOF
     
