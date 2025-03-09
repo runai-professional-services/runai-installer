@@ -14,6 +14,7 @@ show_usage() {
     echo "  --dns DNS_NAME         Specify DNS name for Run.ai certificates"
     echo "  --runai-version VER    Specify Run.ai version to install"
     echo "  --runai-only           Skip prerequisites and directly install Run.ai"
+    echo "  --cluster-only         Skip backend installation and only install Run.ai cluster"
     echo "  --internal-dns         Configure internal DNS"
     echo "  --ip IP_ADDRESS        Required if --internal-dns is set: Specify IP address for internal DNS"
     echo "  --cert CERT_FILE       Use provided certificate file instead of generating self-signed"
@@ -40,6 +41,7 @@ show_usage() {
 DNS_NAME=""
 RUNAI_VERSION=""
 RUNAI_ONLY=false
+CLUSTER_ONLY=false
 INTERNAL_DNS=false
 IP_ADDRESS=""
 CERT_FILE=""
@@ -69,6 +71,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --runai-only)
             RUNAI_ONLY=true
+            shift
+            ;;
+        --cluster-only)
+            CLUSTER_ONLY=true
             shift
             ;;
         --internal-dns)
@@ -178,6 +184,7 @@ echo -e "${BLUE}Configuration:${NC}"
 echo -e "DNS Name: $DNS_NAME"
 echo -e "Run.ai Version: $RUNAI_VERSION"
 echo -e "Run.ai Only: $([ "$RUNAI_ONLY" = true ] && echo "Yes" || echo "No")"
+echo -e "Cluster Only: $([ "$CLUSTER_ONLY" = true ] && echo "Yes" || echo "No")"
 echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || echo "No")"
 echo -e "Install Nginx: $([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No")"
 echo -e "Patch Nginx: $([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")"
@@ -639,9 +646,9 @@ install_runai() {
     # Set up environment variables
     export control_plane_domain=$DNS_NAME
     export cluster_version=$RUNAI_VERSION
-    export cluster_name=appliance
+    export cluster_name=runai-cluster
     
-    # Get token and create cluster
+    
     echo -e "${BLUE}Getting authentication token...${NC}"
     while true; do
         token=$(curl --insecure --location --request POST "https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token" \
@@ -863,7 +870,7 @@ EOF
         
         return 0
     else
-        echo -e "${RED}❌ Error: Failed to configure Bright Cluster Manager nginx reverse proxy${NC}"
+        echo -e "${YELLOW}⚠️ Warning: Could not configure Bright Cluster Manager nginx reverse proxy${NC}"
         return 1
     fi
 }
@@ -940,3 +947,18 @@ echo -e "${GREEN}║                                                            
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
 echo -e "\n${BLUE}You can access Run.ai at: ${GREEN}https://$DNS_NAME${NC}"
 echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / Abcd!234${NC}\n"
+
+# Final success message
+echo -e "${GREEN}✅ Run.ai installation completed successfully${NC}"
+echo
+echo -e "${GREEN}You can access Run.ai at: https://${DNS_NAME}${NC}"
+echo -e "${GREEN}Default credentials: test@run.ai / Abcd!234${NC}"
+echo
+
+# Add certificate instructions if using self-signed certificates
+if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
+    echo -e "${YELLOW}For self-signed certificates, please copy ${TEMP_DIR}/rootCA.pem to your browser or operating system${NC}"
+    echo
+fi
+
+echo -e "${BLUE}Thank you for using the AI Factory One-Click Installer!${NC}"
