@@ -1,12 +1,12 @@
-# 🚀 AI Factory One-Click Installer
+# 🚀 Run.ai One-Click Installer
 
-![AI Factory](https://img.shields.io/badge/AI%20Factory-Installation%20Wizard-blue)
+![Run.ai](https://img.shields.io/badge/AI%20Factory-Installation%20Wizard-blue)
 ![Run.ai](https://img.shields.io/badge/Run.ai-Automation-green)
 ![Kubernetes](https://img.shields.io/badge/Kubernetes-Ready-brightgreen)
 
 ## 🌟 Overview
 
-The AI Factory One-Click Installer is a powerful bash script that automates the deployment of Run.ai on Kubernetes clusters. This tool simplifies what would otherwise be a complex, multi-step installation process into a single command with customizable options.
+The Run.ai One-Click Installer is a powerful bash script that automates the deployment of Run.ai on Kubernetes clusters. This tool simplifies what would otherwise be a complex, multi-step installation process into a single command with customizable options.
 
 ## ✨ Features
 
@@ -32,19 +32,22 @@ one-click-installer.sh --dns runai.example.com --internal-dns --ip 172.21.140.20
 ### Installation with custom certificates
 
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem
+one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
+ --cert /path/to/cert.pem --key /path/to/key.pem
 ```
 
 ### Full installation with all optional components
 
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --nginx --prometheus --gpu-operator --knative --internal-dns
+one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
+ --nginx --prometheus --gpu-operator --knative --internal-dns
 ```
 
 ### Full installation with all optional components - use case without any DNS - using sslip.io & BCM 
 
 ```sh
-one-click-installer.sh --dns www.192.168.0.1.sslip.io  --runai-version 2.20.22 --nginx --prometheus --gpu-operator --knative -BCM
+one-click-installer.sh --dns www.192.168.0.1.sslip.io  --runai-version 2.20.22 --nginx --prometheus \
+ --gpu-operator --knative -BCM
 ```
 
 
@@ -85,6 +88,7 @@ one-click-installer.sh --dns www.192.168.0.1.sslip.io  --runai-version 2.20.22 -
 5. **Deploys** Run.ai backend services
 6. **Configures** the Run.ai cluster
 7. **Verifies** the installation
+8. **Patch BCM** configure BCM NGINX to route traffic to Run.ai
 
 ## 🔒 Default Access
 
