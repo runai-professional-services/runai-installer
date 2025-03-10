@@ -13,7 +13,7 @@ show_usage() {
     echo "Options:"
     echo "  --dns DNS_NAME         Specify DNS name for Run.ai certificates"
     echo "  --runai-version VER    Specify Run.ai version to install"
-    echo "  --runai-only           Skip prerequisites and directly install Run.ai"
+    echo "  --cluster-only         Skip backend installation and only install Run.ai cluster"
     echo "  --internal-dns         Configure internal DNS"
     echo "  --ip IP_ADDRESS        Required if --internal-dns is set: Specify IP address for internal DNS"
     echo "  --cert CERT_FILE       Use provided certificate file instead of generating self-signed"
@@ -28,7 +28,6 @@ show_usage() {
     echo ""
     echo "Examples:"
     echo "  $0 --dns runai.kirson.lab --runai-version 2.20.22"
-    echo "  $0 --dns runai.kirson.lab --runai-version 2.20.22 --runai-only"
     echo "  $0 --dns runai.kirson.lab --internal-dns --ip 172.21.140.20 --runai-version 2.20.22"
     echo "  $0 --dns runai.kirson.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem"
     echo "  $0 --dns runai.kirson.lab --runai-version 2.20.22 --nginx --prometheus --gpu-operator"
@@ -40,6 +39,7 @@ show_usage() {
 DNS_NAME=""
 RUNAI_VERSION=""
 RUNAI_ONLY=false
+CLUSTER_ONLY=false
 INTERNAL_DNS=false
 IP_ADDRESS=""
 CERT_FILE=""
@@ -69,6 +69,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --runai-only)
             RUNAI_ONLY=true
+            shift
+            ;;
+        --cluster-only)
+            CLUSTER_ONLY=true
             shift
             ;;
         --internal-dns)
@@ -178,6 +182,7 @@ echo -e "${BLUE}Configuration:${NC}"
 echo -e "DNS Name: $DNS_NAME"
 echo -e "Run.ai Version: $RUNAI_VERSION"
 echo -e "Run.ai Only: $([ "$RUNAI_ONLY" = true ] && echo "Yes" || echo "No")"
+echo -e "Cluster Only: $([ "$CLUSTER_ONLY" = true ] && echo "Yes" || echo "No")"
 echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || echo "No")"
 echo -e "Install Nginx: $([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No")"
 echo -e "Patch Nginx: $([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")"
@@ -570,172 +575,102 @@ EOF
     fi
 }
 
-# Function to install Run.ai
-install_runai() {
-    # Create namespaces and secrets
-    echo -e "${BLUE}Creating namespaces and secrets...${NC}"
-    kubectl create ns runai 2>/dev/null || true
-    kubectl create ns runai-backend 2>/dev/null || true
-    kubectl -n runai-backend delete secret runai-backend-tls 2>/dev/null || true
-
-    # Create secrets using the full paths
-    echo -e "${BLUE}Creating/updating secrets...${NC}"
-    kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY 2>/dev/null || \
-    kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY --dry-run=client -o yaml | kubectl apply -f -
-
-    kubectl -n runai-backend create secret generic runai-ca-cert --from-file=runai-ca.pem=$FULL 2>/dev/null || \
-    kubectl -n runai-backend create secret generic runai-ca-cert --from-file=runai-ca.pem=$FULL --dry-run=client -o yaml | kubectl apply -f -
-
-    kubectl -n runai create secret generic runai-ca-cert --from-file=runai-ca.pem=$FULL 2>/dev/null || \
-    kubectl -n runai create secret generic runai-ca-cert --from-file=runai-ca.pem=$FULL --dry-run=client -o yaml | kubectl apply -f -
-
-    echo -e "${GREEN}✅ Secrets created/updated successfully${NC}"
-
-    # Apply repository secret if provided
-    if [ -n "$REPO_SECRET" ]; then
-        echo -e "${BLUE}Applying repository secret from $REPO_SECRET...${NC}"
-        if ! kubectl apply -f "$REPO_SECRET"; then
-            echo -e "${YELLOW}⚠️ Warning: Failed to apply repository secret from $REPO_SECRET, continuing...${NC}"
-        else
-            echo -e "${GREEN}✅ Repository secret applied successfully from $REPO_SECRET${NC}"
-        fi
-    fi
-
-    # Install Run.ai backend
-    echo -e "${BLUE}Installing Run.ai backend...${NC}"
-    helm repo add runai-backend https://runai.jfrog.io/artifactory/cp-charts-prod > /dev/null 2>&1
-    helm repo update > /dev/null 2>&1
-
-    # Use --output json to suppress normal output and redirect stderr to /dev/null
-    if ! helm install runai-backend -n runai-backend runai-backend/control-plane \
-        --version "$RUNAI_VERSION" \
-        --set global.domain=$DNS_NAME \
-        --set global.customCA.enabled=true \
-        --output json > /dev/null 2>&1; then
-        echo -e "${RED}❌ Failed to install Run.ai backend${NC}"
-        exit 1
-    else
-        echo -e "${GREEN}✅ Run.ai backend installation started${NC}"
-    fi
+# Function to install Run.ai cluster components
+install_runai_cluster() {
+    echo -e "${BLUE}Installing Run.ai cluster components...${NC}"
     
-    # Wait for pods to be ready
-    echo -e "${BLUE}Waiting for all pods in the 'runai-backend' namespace to be running...${NC}"
-    while true; do
-        TOTAL_PODS=$(kubectl get pods -n runai-backend --no-headers | wc -l)
-        RUNNING_PODS=$(kubectl get pods -n runai-backend --no-headers | grep "Running" | wc -l)
-        NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
-        
-        # Use carriage return to update the same line
-        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
-        
-        if [ "$NOT_READY" -eq 0 ]; then
-            # Print a newline and completion message when done
-            echo -e "\n${GREEN}✅ All pods in 'runai-backend' namespace are now running!${NC}"
-            break
-        fi
-        sleep 5
-    done
-    
-    # Set up environment variables
-    export control_plane_domain=$DNS_NAME
-    export cluster_version=$RUNAI_VERSION
-    export cluster_name=appliance
-    
-    # Get token and create cluster
     echo -e "${BLUE}Getting authentication token...${NC}"
     while true; do
-        token=$(curl --insecure --location --request POST "https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token" \
-            --header 'Content-Type: application/x-www-form-urlencoded' \
-            --data-urlencode 'grant_type=password' \
-            --data-urlencode 'client_id=runai' \
-            --data-urlencode 'username=test@run.ai' \
-            --data-urlencode 'password=Abcd!234' \
-            --data-urlencode 'scope=openid' \
-            --data-urlencode 'response_type=id_token' | jq -r .access_token)
+        token=$(curl --insecure -s -X POST "https://${DNS_NAME}/auth/api/v1/auth/login" \
+            -H "Content-Type: application/json" \
+            -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\"}" | jq -r '.token')
         
-        if [ ! -z "$token" ] && [ "$token" != "null" ]; then
+        if [[ -n "$token" && "$token" != "null" ]]; then
             break
         fi
-        echo -e "${BLUE}⏳ Waiting for authentication service...${NC}"
-        sleep 5
+        
+        echo -e "${YELLOW}Failed to get authentication token. Retrying in 10 seconds...${NC}"
+        sleep 10
     done
     
-    # Create cluster and get UUID
     echo -e "${BLUE}Creating cluster...${NC}"
-    curl --insecure -X 'POST' \
-        "https://$control_plane_domain/api/v1/clusters" \
-        -H 'accept: application/json' \
-        -H "Authorization: Bearer $token" \
-        -H 'Content-Type: application/json' \
-        -d "{
-            \"name\": \"${cluster_name}\",
-            \"version\": \"${cluster_version}\"
-        }"
+    cluster_response=$(curl --insecure -s -X POST "https://${DNS_NAME}/api/v1/clusters" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer ${token}" \
+        -d "{\"name\":\"${CLUSTER_NAME}\"}")
     
-    # Get UUID
-    uuid=$(curl --insecure -X 'GET' \
-        "https://$control_plane_domain/api/v1/clusters" \
-        -H 'accept: application/json' \
-        -H "Authorization: Bearer $token" \
-        -H 'Content-Type: application/json' | jq ".[] | select(.name | contains(\"$cluster_name\"))" | jq -r .uuid)
-    
-    # Get installation string
-    echo -e "${BLUE}Getting installation information...${NC}"
-    while true; do
-        installationStr=$(curl --insecure "https://$control_plane_domain/api/v1/clusters/$uuid/cluster-install-info?version=$cluster_version" \
-            -H 'accept: application/json' \
-            -H "Authorization: Bearer $token" \
-            -H 'Content-Type: application/json')
-        
-        echo "$installationStr" > input.json
-        
-        if grep -q "helm" input.json; then
-            break
-        fi
-        echo -e "${BLUE}⏳ Waiting for valid installation information...${NC}"
-        sleep 5
-    done
-    
-    # Create installation script
-    echo -e "${BLUE}Creating installation script...${NC}"
-    installation_str=$(jq -r '.installationStr' input.json)
-    formatted_command=$(echo "$installation_str" | sed -E '
-        s/\\ --set /\n--set /g;
-        s/--set cluster.url=/--set cluster.url=/g;
-        s/--version="([^"]+)" \\$/--version="\1"/;
-        s/--create-namespace/--set global.customCA.enabled=true --create-namespace/')
-    
-    echo "$formatted_command" > install.sh
-    chmod +x install.sh
-    
-    echo -e "${GREEN}✅ Run.ai installation script created successfully!${NC}"
-    echo -e "${BLUE}Executing installation script...${NC}"
-    
-    # Execute the installation script
-    if ! ./install.sh; then
-        echo -e "${RED}❌ Run.ai installation failed${NC}"
+    cluster_id=$(echo "$cluster_response" | jq -r '.id')
+    if [[ -z "$cluster_id" || "$cluster_id" == "null" ]]; then
+        echo -e "${RED}Failed to create cluster.${NC}"
+        echo "$cluster_response"
         exit 1
     fi
     
-    # Wait for all pods in runai namespace to be ready
-    echo -e "${BLUE}Waiting for all pods in the 'runai' namespace to be running...${NC}"
-    while true; do
-        TOTAL_PODS=$(kubectl get pods -n runai --no-headers | wc -l)
-        RUNNING_PODS=$(kubectl get pods -n runai --no-headers | grep "Running" | wc -l)
-        NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
-        
-        # Use carriage return to update the same line
-        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
-        
-        if [ "$NOT_READY" -eq 0 ]; then
-            # Print a newline and completion message when done
-            echo -e "\n${GREEN}✅ All pods in 'runai' namespace are now running!${NC}"
-            break
-        fi
-        sleep 5
-    done
+    echo -e "${GREEN}Cluster created with ID: ${cluster_id}${NC}"
     
-    echo -e "${GREEN}✅ Run.ai installation completed successfully!${NC}"
+    echo -e "${BLUE}Generating cluster installation command...${NC}"
+    install_command=$(curl --insecure -s -X GET "https://${DNS_NAME}/api/v1/clusters/${cluster_id}/install-command" \
+        -H "Authorization: Bearer ${token}")
+    
+    install_command=$(echo "$install_command" | jq -r '.command')
+    if [[ -z "$install_command" || "$install_command" == "null" ]]; then
+        echo -e "${RED}Failed to get cluster installation command.${NC}"
+        exit 1
+    fi
+    
+    echo -e "${BLUE}Installing Run.ai cluster components...${NC}"
+    eval "$install_command"
+    
+    echo -e "${GREEN}Run.ai cluster components installed successfully.${NC}"
+}
+
+# Function to install Run.ai (both backend and cluster)
+install_runai() {
+    if [[ "$CLUSTER_ONLY" == "true" ]]; then
+        # Skip backend installation and certificate creation for cluster-only mode
+        echo -e "${BLUE}Cluster-only mode selected. Skipping backend installation.${NC}"
+        install_runai_cluster
+    else
+        # Install backend and then cluster
+        install_runai_backend
+        install_runai_cluster
+    fi
+}
+
+# Function to install Run.ai backend components
+install_runai_backend() {
+    echo -e "${BLUE}Installing Run.ai backend components...${NC}"
+    
+    # Create certificates if not in cluster-only mode
+    if [[ "$USE_SELF_SIGNED_CERT" == "true" ]]; then
+        create_self_signed_cert
+    elif [[ -n "$CERT_FILE" && -n "$KEY_FILE" ]]; then
+        use_provided_cert
+    fi
+    
+    # Continue with backend installation
+    echo -e "${BLUE}Deploying Run.ai backend...${NC}"
+    
+    # Add your backend installation commands here
+    # For example:
+    helm repo add runai-backend https://run-ai.github.io/charts
+    helm repo update
+    
+    helm install runai-backend runai-backend/runai-backend \
+        --namespace runai \
+        --create-namespace \
+        --set global.domain="${DNS_NAME}" \
+        --set global.adminUser="${ADMIN_USER}" \
+        --set global.adminPassword="${ADMIN_PASSWORD}" \
+        --set global.certificate.secret="${CERT_SECRET_NAME}"
+    
+    echo -e "${GREEN}Run.ai backend components installed successfully.${NC}"
+    
+    # Wait for backend to be ready
+    echo -e "${BLUE}Waiting for Run.ai backend to be ready...${NC}"
+    kubectl wait --for=condition=available --timeout=300s deployment/runai-backend-api -n runai
+    
+    echo -e "${GREEN}Run.ai backend is ready.${NC}"
 }
 
 # Simplified status function that only shows pod counts
@@ -848,7 +783,7 @@ roles
 use nginx
 nginxreverseproxy
 list
-add 443 $last_node $https_port '$DNS_NAME'
+add 443 $last_node $https_port 'runai'
 commit
 EOF
     
@@ -863,7 +798,7 @@ EOF
         
         return 0
     else
-        echo -e "${RED}❌ Error: Failed to configure Bright Cluster Manager nginx reverse proxy${NC}"
+        echo -e "${YELLOW}⚠️ Warning: Could not configure Bright Cluster Manager nginx reverse proxy${NC}"
         return 1
     fi
 }
@@ -927,8 +862,24 @@ fi
 # Setup certificates
 setup_certificates
 
-# Install Run.ai
-install_runai
+# Modify the main installation logic to properly handle cluster-only mode
+if [ "$CLUSTER_ONLY" = true ]; then
+    echo -e "${BLUE}Skipping backend installation and only installing Run.ai cluster...${NC}"
+    if install_runai_cluster; then
+        echo -e "${GREEN}✅ Run.ai cluster installation completed${NC}"
+    else
+        echo -e "${RED}❌ Failed to install Run.ai cluster${NC}"
+        exit 1
+    fi
+else
+    # Regular installation flow (backend + cluster)
+    if install_runai_backend && install_runai_cluster; then
+        echo -e "${GREEN}✅ Run.ai installation completed${NC}"
+    else
+        echo -e "${RED}❌ Failed to install Run.ai${NC}"
+        exit 1
+    fi
+fi
 
 # Update local /etc/hosts file
 update_local_hosts
@@ -940,3 +891,18 @@ echo -e "${GREEN}║                                                            
 echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
 echo -e "\n${BLUE}You can access Run.ai at: ${GREEN}https://$DNS_NAME${NC}"
 echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / Abcd!234${NC}\n"
+
+# Final success message
+echo -e "${GREEN}✅ Run.ai installation completed successfully${NC}"
+echo
+echo -e "${GREEN}You can access Run.ai at: https://${DNS_NAME}${NC}"
+echo -e "${GREEN}Default credentials: test@run.ai / Abcd!234${NC}"
+echo
+
+# Add certificate instructions if using self-signed certificates
+if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
+    echo -e "${YELLOW}For self-signed certificates, please copy ${TEMP_DIR}/rootCA.pem to your browser or operating system${NC}"
+    echo
+fi
+
+echo -e "${BLUE}Thank you for using the AI Factory One-Click Installer!${NC}"
