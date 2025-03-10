@@ -198,12 +198,12 @@ echo -e "\n${BLUE}Starting installation...${NC}"
 # Function to check if Run.ai is already installed
 check_runai_installed() {
     echo -e "${BLUE}Checking if Run.ai is already installed...${NC}"
-    
+
     if helm list -A | grep -q "runai"; then
         echo -e "${YELLOW}⚠️ Warning: Run.ai appears to be already installed on this cluster.${NC}"
         echo -e "${YELLOW}Helm releases found:${NC}"
         helm list -A | grep "runai"
-        
+
         echo -e "\n${YELLOW}Do you want to continue with the installation? This might overwrite existing configuration.${NC}"
         echo -e "${YELLOW}Press Enter to continue or Ctrl+C to abort...${NC}"
         read
@@ -219,17 +219,17 @@ patch_coredns() {
     # First check if the DNS entry already exists
     if kubectl get cm coredns -n kube-system -o yaml | grep -q "$DNS_NAME"; then
         echo -e "${YELLOW}⚠️ DNS entry for $DNS_NAME already exists in CoreDNS${NC}"
-        
+
         # Update the IP if needed
         if ! kubectl get cm coredns -n kube-system -o yaml | grep -q "$IP_ADDRESS $DNS_NAME"; then
             echo -e "${BLUE}Updating IP address for $DNS_NAME${NC}"
-            
+
             # Get current Corefile
             CURRENT_COREFILE=$(kubectl get cm coredns -n kube-system -o jsonpath='{.data.Corefile}')
-            
+
             # Replace the IP address
             NEW_COREFILE=$(echo "$CURRENT_COREFILE" | sed -E "s/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ $DNS_NAME/$IP_ADDRESS $DNS_NAME/g")
-            
+
             # Apply the updated ConfigMap
             kubectl patch cm coredns -n kube-system --type='merge' --patch="
                 data:
@@ -291,20 +291,20 @@ patch_coredns() {
 # Function to patch Nginx Ingress Controller service
 patch_nginx_service() {
     echo -e "${BLUE}Patching Nginx Ingress Controller service with IP: $IP_ADDRESS${NC}"
-    
+
     # First, check if the service exists
     if ! kubectl get svc -n ingress-nginx ingress-nginx-controller &> /dev/null; then
         echo -e "${YELLOW}⚠️ Warning: Nginx Ingress Controller service not found${NC}"
         return 1
     fi
-    
+
     # Check if the externalIP is already set to our IP
     CURRENT_IP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
     if [ "$CURRENT_IP" = "$IP_ADDRESS" ]; then
         echo -e "${GREEN}✅ Nginx Ingress Controller already has the correct externalIP: $IP_ADDRESS${NC}"
         return 0
     fi
-    
+
     # Simple direct patch
     if kubectl -n ingress-nginx patch svc ingress-nginx-controller --type='merge' -p "{\"spec\":{\"externalIPs\":[\"$IP_ADDRESS\"]}}"; then
         echo -e "${GREEN}✅ Nginx Ingress Controller service patched successfully!${NC}"
@@ -355,9 +355,9 @@ install_prerequisites() {
         echo -e "${RED}❌ Kubernetes cluster not found. Please install Kubernetes first or use --runai-only with an existing cluster.${NC}"
         exit 1
     fi
-    
+
     echo -e "${BLUE}Installing prerequisites...${NC}"
-    
+
     # Check if Nginx Ingress should be installed
     if [ "$INSTALL_NGINX" = true ]; then
         # Check if Nginx Ingress is already installed
@@ -372,11 +372,11 @@ install_prerequisites() {
             if ! helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx > /dev/null 2>&1; then
                 echo -e "${YELLOW}⚠️ Warning: Failed to add nginx helm repo, continuing...${NC}"
             fi
-            
+
             if ! helm repo update > /dev/null 2>&1; then
                 echo -e "${YELLOW}⚠️ Warning: Failed to update helm repos, continuing...${NC}"
             fi
-            
+
             if ! helm upgrade -i nginx-ingress ingress-nginx/ingress-nginx \
                 --namespace ingress-nginx --create-namespace \
                 --set controller.kind=DaemonSet \
@@ -384,7 +384,7 @@ install_prerequisites() {
                 echo -e "${YELLOW}⚠️ Warning: Failed to install nginx ingress, continuing...${NC}"
             else
                 echo -e "${GREEN}✅ Nginx Ingress Controller installed successfully!${NC}"
-                
+
                 # Double-check that externalIPs is set correctly
                 if [ -n "$IP_ADDRESS" ] && ! kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.externalIPs[0]}' | grep -q "$IP_ADDRESS"; then
                     echo -e "${YELLOW}⚠️ Warning: externalIPs not set correctly during installation, attempting to patch...${NC}"
@@ -395,7 +395,7 @@ install_prerequisites() {
     else
         echo -e "${BLUE}Skipping Nginx Ingress Controller installation (--nginx flag not set)${NC}"
     fi
-    
+
     # Check if Prometheus should be installed
     if [ "$INSTALL_PROMETHEUS" = true ]; then
         # Check if Prometheus is already installed
@@ -407,11 +407,11 @@ install_prerequisites() {
             if ! helm repo add prometheus-community https://prometheus-community.github.io/helm-charts > /dev/null 2>&1; then
                 echo -e "${YELLOW}⚠️ Warning: Failed to add prometheus helm repo, continuing...${NC}"
             fi
-            
+
             if ! helm repo update > /dev/null 2>&1; then
                 echo -e "${YELLOW}⚠️ Warning: Failed to update helm repos, continuing...${NC}"
             fi
-            
+
             if ! helm install prometheus prometheus-community/kube-prometheus-stack \
                 -n monitoring --create-namespace --set grafana.enabled=false > /dev/null 2>&1; then
                 echo -e "${YELLOW}⚠️ Warning: Failed to install prometheus stack, continuing...${NC}"
@@ -422,7 +422,7 @@ install_prerequisites() {
     else
         echo -e "${BLUE}Skipping Prometheus Stack installation (--prometheus flag not set)${NC}"
     fi
-    
+
     # Check if GPU Operator should be installed
     if [ "$INSTALL_GPU_OPERATOR" = true ]; then
         # Check if GPU Operator is already installed
@@ -434,11 +434,11 @@ install_prerequisites() {
             if ! helm repo add nvidia https://helm.ngc.nvidia.com/nvidia > /dev/null 2>&1; then
                 echo -e "${YELLOW}⚠️ Warning: Failed to add NVIDIA helm repo, continuing...${NC}"
             fi
-            
+
             if ! helm repo update > /dev/null 2>&1; then
                 echo -e "${YELLOW}⚠️ Warning: Failed to update helm repos, continuing...${NC}"
             fi
-            
+
             if ! helm install --wait --generate-name \
                 -n gpu-operator --create-namespace \
                 nvidia/gpu-operator > /dev/null 2>&1; then
@@ -450,7 +450,7 @@ install_prerequisites() {
     else
         echo -e "${BLUE}Skipping NVIDIA GPU Operator installation (--gpu-operator flag not set)${NC}"
     fi
-    
+
     # Check if local-path-storage is already installed
     if kubectl get ns local-path-storage &> /dev/null; then
         echo -e "${BLUE}Patching local-path-config ConfigMap...${NC}"
@@ -481,23 +481,23 @@ setup_certificates() {
     # Create certificates directory
     CERT_DIR="./certificates"
     CURRENT_DIR="$(pwd)"
-    
+
     # Check if user provided certificates
     if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ]; then
         echo -e "${BLUE}Using provided certificate and key files...${NC}"
-        
+
         # Create certificates directory if it doesn't exist
         mkdir -p "$CERT_DIR"
-        
+
         # Copy provided certificate and key to the certificates directory
         cp "$CERT_FILE" "$CERT_DIR/runai.crt"
         cp "$KEY_FILE" "$CERT_DIR/runai.key"
-        
+
         # Set certificate paths
         export CERT="$CERT_DIR/runai.crt"
         export KEY="$CERT_DIR/runai.key"
         export FULL="$CERT_FILE"  # Use the provided certificate as the full chain
-        
+
         echo -e "${GREEN}✅ Using provided certificates${NC}"
     else
         echo -e "${BLUE}Creating certificates in: $CERT_DIR${NC}"
@@ -506,7 +506,7 @@ setup_certificates() {
 
         # Set the password environment variable
         export OPENSSL_PASSWORD='kirson'
-        
+
         echo -e "${BLUE}Generating certificates...${NC}"
         # Generate the root key with the provided passphrase
         if ! openssl genrsa -des3 -passout env:OPENSSL_PASSWORD -out rootCA.key 2048; then
@@ -575,102 +575,172 @@ EOF
     fi
 }
 
-# Function to install Run.ai cluster components
-install_runai_cluster() {
-    echo -e "${BLUE}Installing Run.ai cluster components...${NC}"
-    
-    echo -e "${BLUE}Getting authentication token...${NC}"
+# Function to install Run.ai
+install_runai() {
+    # Create namespaces and secrets
+    echo -e "${BLUE}Creating namespaces and secrets...${NC}"
+    kubectl create ns runai 2>/dev/null || true
+    kubectl create ns runai-backend 2>/dev/null || true
+    kubectl -n runai-backend delete secret runai-backend-tls 2>/dev/null || true
+
+    # Create secrets using the full paths
+    echo -e "${BLUE}Creating/updating secrets...${NC}"
+    kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY 2>/dev/null || \
+    kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl -n runai-backend create secret generic runai-ca-cert --from-file=runai-ca.pem=$FULL 2>/dev/null || \
+    kubectl -n runai-backend create secret generic runai-ca-cert --from-file=runai-ca.pem=$FULL --dry-run=client -o yaml | kubectl apply -f -
+
+    kubectl -n runai create secret generic runai-ca-cert --from-file=runai-ca.pem=$FULL 2>/dev/null || \
+    kubectl -n runai create secret generic runai-ca-cert --from-file=runai-ca.pem=$FULL --dry-run=client -o yaml | kubectl apply -f -
+
+    echo -e "${GREEN}✅ Secrets created/updated successfully${NC}"
+
+    # Apply repository secret if provided
+    if [ -n "$REPO_SECRET" ]; then
+        echo -e "${BLUE}Applying repository secret from $REPO_SECRET...${NC}"
+        if ! kubectl apply -f "$REPO_SECRET"; then
+            echo -e "${YELLOW}⚠️ Warning: Failed to apply repository secret from $REPO_SECRET, continuing...${NC}"
+        else
+            echo -e "${GREEN}✅ Repository secret applied successfully from $REPO_SECRET${NC}"
+        fi
+    fi
+
+    # Install Run.ai backend
+    echo -e "${BLUE}Installing Run.ai backend...${NC}"
+    helm repo add runai-backend https://runai.jfrog.io/artifactory/cp-charts-prod > /dev/null 2>&1
+    helm repo update > /dev/null 2>&1
+
+    # Use --output json to suppress normal output and redirect stderr to /dev/null
+    if ! helm install runai-backend -n runai-backend runai-backend/control-plane \
+        --version "$RUNAI_VERSION" \
+        --set global.domain=$DNS_NAME \
+        --set global.customCA.enabled=true \
+        --output json > /dev/null 2>&1; then
+        echo -e "${RED}❌ Failed to install Run.ai backend${NC}"
+        exit 1
+    else
+        echo -e "${GREEN}✅ Run.ai backend installation started${NC}"
+    fi
+
+    # Wait for pods to be ready
+    echo -e "${BLUE}Waiting for all pods in the 'runai-backend' namespace to be running...${NC}"
     while true; do
-        token=$(curl --insecure -s -X POST "https://${DNS_NAME}/auth/api/v1/auth/login" \
-            -H "Content-Type: application/json" \
-            -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASSWORD}\"}" | jq -r '.token')
-        
-        if [[ -n "$token" && "$token" != "null" ]]; then
+        TOTAL_PODS=$(kubectl get pods -n runai-backend --no-headers | wc -l)
+        RUNNING_PODS=$(kubectl get pods -n runai-backend --no-headers | grep "Running" | wc -l)
+        NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
+
+        # Use carriage return to update the same line
+        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
+
+        if [ "$NOT_READY" -eq 0 ]; then
+            # Print a newline and completion message when done
+            echo -e "\n${GREEN}✅ All pods in 'runai-backend' namespace are now running!${NC}"
             break
         fi
-        
-        echo -e "${YELLOW}Failed to get authentication token. Retrying in 10 seconds...${NC}"
-        sleep 10
+        sleep 5
     done
-    
+
+    # Set up environment variables
+    export control_plane_domain=$DNS_NAME
+    export cluster_version=$RUNAI_VERSION
+    export cluster_name=runai-cluster
+
+
+    echo -e "${BLUE}Getting authentication token...${NC}"
+    while true; do
+        token=$(curl --insecure --location --request POST "https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token" \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'grant_type=password' \
+            --data-urlencode 'client_id=runai' \
+            --data-urlencode 'username=test@run.ai' \
+            --data-urlencode 'password=Abcd!234' \
+            --data-urlencode 'scope=openid' \
+            --data-urlencode 'response_type=id_token' | jq -r .access_token)
+
+        if [ ! -z "$token" ] && [ "$token" != "null" ]; then
+            break
+        fi
+        echo -e "${BLUE}⏳ Waiting for authentication service...${NC}"
+        sleep 5
+    done
+
+    # Create cluster and get UUID
     echo -e "${BLUE}Creating cluster...${NC}"
-    cluster_response=$(curl --insecure -s -X POST "https://${DNS_NAME}/api/v1/clusters" \
-        -H "Content-Type: application/json" \
-        -H "Authorization: Bearer ${token}" \
-        -d "{\"name\":\"${CLUSTER_NAME}\"}")
-    
-    cluster_id=$(echo "$cluster_response" | jq -r '.id')
-    if [[ -z "$cluster_id" || "$cluster_id" == "null" ]]; then
-        echo -e "${RED}Failed to create cluster.${NC}"
-        echo "$cluster_response"
+    curl --insecure -X 'POST' \
+        "https://$control_plane_domain/api/v1/clusters" \
+        -H 'accept: application/json' \
+        -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json' \
+        -d "{
+            \"name\": \"${cluster_name}\",
+            \"version\": \"${cluster_version}\"
+        }"
+
+    # Get UUID
+    uuid=$(curl --insecure -X 'GET' \
+        "https://$control_plane_domain/api/v1/clusters" \
+        -H 'accept: application/json' \
+        -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json' | jq ".[] | select(.name | contains(\"$cluster_name\"))" | jq -r .uuid)
+
+    # Get installation string
+    echo -e "${BLUE}Getting installation information...${NC}"
+    while true; do
+        installationStr=$(curl --insecure "https://$control_plane_domain/api/v1/clusters/$uuid/cluster-install-info?version=$cluster_version" \
+            -H 'accept: application/json' \
+            -H "Authorization: Bearer $token" \
+            -H 'Content-Type: application/json')
+
+        echo "$installationStr" > input.json
+
+        if grep -q "helm" input.json; then
+            break
+        fi
+        echo -e "${BLUE}⏳ Waiting for valid installation information...${NC}"
+        sleep 5
+    done
+
+    # Create installation script
+    echo -e "${BLUE}Creating installation script...${NC}"
+    installation_str=$(jq -r '.installationStr' input.json)
+    formatted_command=$(echo "$installation_str" | sed -E '
+        s/\\ --set /\n--set /g;
+        s/--set cluster.url=/--set cluster.url=/g;
+        s/--version="([^"]+)" \\$/--version="\1"/;
+        s/--create-namespace/--set global.customCA.enabled=true --create-namespace/')
+
+    echo "$formatted_command" > install.sh
+    chmod +x install.sh
+
+    echo -e "${GREEN}✅ Run.ai installation script created successfully!${NC}"
+    echo -e "${BLUE}Executing installation script...${NC}"
+
+    # Execute the installation script
+    if ! ./install.sh; then
+        echo -e "${RED}❌ Run.ai installation failed${NC}"
         exit 1
     fi
-    
-    echo -e "${GREEN}Cluster created with ID: ${cluster_id}${NC}"
-    
-    echo -e "${BLUE}Generating cluster installation command...${NC}"
-    install_command=$(curl --insecure -s -X GET "https://${DNS_NAME}/api/v1/clusters/${cluster_id}/install-command" \
-        -H "Authorization: Bearer ${token}")
-    
-    install_command=$(echo "$install_command" | jq -r '.command')
-    if [[ -z "$install_command" || "$install_command" == "null" ]]; then
-        echo -e "${RED}Failed to get cluster installation command.${NC}"
-        exit 1
-    fi
-    
-    echo -e "${BLUE}Installing Run.ai cluster components...${NC}"
-    eval "$install_command"
-    
-    echo -e "${GREEN}Run.ai cluster components installed successfully.${NC}"
-}
 
-# Function to install Run.ai (both backend and cluster)
-install_runai() {
-    if [[ "$CLUSTER_ONLY" == "true" ]]; then
-        # Skip backend installation and certificate creation for cluster-only mode
-        echo -e "${BLUE}Cluster-only mode selected. Skipping backend installation.${NC}"
-        install_runai_cluster
-    else
-        # Install backend and then cluster
-        install_runai_backend
-        install_runai_cluster
-    fi
-}
+    # Wait for all pods in runai namespace to be ready
+    echo -e "${BLUE}Waiting for all pods in the 'runai' namespace to be running...${NC}"
+    while true; do
+        TOTAL_PODS=$(kubectl get pods -n runai --no-headers | wc -l)
+        RUNNING_PODS=$(kubectl get pods -n runai --no-headers | grep "Running" | wc -l)
+        NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
 
-# Function to install Run.ai backend components
-install_runai_backend() {
-    echo -e "${BLUE}Installing Run.ai backend components...${NC}"
-    
-    # Create certificates if not in cluster-only mode
-    if [[ "$USE_SELF_SIGNED_CERT" == "true" ]]; then
-        create_self_signed_cert
-    elif [[ -n "$CERT_FILE" && -n "$KEY_FILE" ]]; then
-        use_provided_cert
-    fi
-    
-    # Continue with backend installation
-    echo -e "${BLUE}Deploying Run.ai backend...${NC}"
-    
-    # Add your backend installation commands here
-    # For example:
-    helm repo add runai-backend https://run-ai.github.io/charts
-    helm repo update
-    
-    helm install runai-backend runai-backend/runai-backend \
-        --namespace runai \
-        --create-namespace \
-        --set global.domain="${DNS_NAME}" \
-        --set global.adminUser="${ADMIN_USER}" \
-        --set global.adminPassword="${ADMIN_PASSWORD}" \
-        --set global.certificate.secret="${CERT_SECRET_NAME}"
-    
-    echo -e "${GREEN}Run.ai backend components installed successfully.${NC}"
-    
-    # Wait for backend to be ready
-    echo -e "${BLUE}Waiting for Run.ai backend to be ready...${NC}"
-    kubectl wait --for=condition=available --timeout=300s deployment/runai-backend-api -n runai
-    
-    echo -e "${GREEN}Run.ai backend is ready.${NC}"
+        # Use carriage return to update the same line
+        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
+
+        if [ "$NOT_READY" -eq 0 ]; then
+            # Print a newline and completion message when done
+            echo -e "\n${GREEN}✅ All pods in 'runai' namespace are now running!${NC}"
+            break
+        fi
+        sleep 5
+    done
+
+    echo -e "${GREEN}✅ Run.ai installation completed successfully!${NC}"
 }
 
 # Simplified status function that only shows pod counts
@@ -678,15 +748,15 @@ show_simple_status() {
     # Get pod counts
     BACKEND_TOTAL=$(kubectl get pods -n runai-backend --no-headers 2>/dev/null | wc -l || echo "0")
     BACKEND_RUNNING=$(kubectl get pods -n runai-backend --no-headers 2>/dev/null | grep "Running" | wc -l || echo "0")
-    
+
     if [ "$BACKEND_TOTAL" -gt 0 ]; then
         BACKEND_PCT=$((BACKEND_RUNNING * 100 / BACKEND_TOTAL))
         echo -e "Run.ai Backend: ${GREEN}$BACKEND_RUNNING/$BACKEND_TOTAL pods running ($BACKEND_PCT%)${NC}"
     fi
-    
+
     CLUSTER_TOTAL=$(kubectl get pods -n runai --no-headers 2>/dev/null | wc -l || echo "0")
     CLUSTER_RUNNING=$(kubectl get pods -n runai --no-headers 2>/dev/null | grep "Running" | wc -l || echo "0")
-    
+
     if [ "$CLUSTER_TOTAL" -gt 0 ]; then
         CLUSTER_PCT=$((CLUSTER_RUNNING * 100 / CLUSTER_TOTAL))
         echo -e "Run.ai Cluster: ${GREEN}$CLUSTER_RUNNING/$CLUSTER_TOTAL pods running ($CLUSTER_PCT%)${NC}"
@@ -696,13 +766,13 @@ show_simple_status() {
 # Function to update local /etc/hosts file
 update_local_hosts() {
     echo -e "${BLUE}Updating local /etc/hosts file with $IP_ADDRESS $DNS_NAME...${NC}"
-    
+
     # Check if we have sudo access
     if ! sudo -n true 2>/dev/null; then
         echo -e "${YELLOW}⚠️ Sudo access required to update /etc/hosts file${NC}"
         echo -e "${YELLOW}Please enter your password when prompted${NC}"
     fi
-    
+
     # Check if the entry already exists
     if grep -q "$DNS_NAME" /etc/hosts; then
         # Update the existing entry
@@ -718,7 +788,7 @@ update_local_hosts() {
         echo -e "${BLUE}Adding new entry to /etc/hosts...${NC}"
         echo "$IP_ADDRESS $DNS_NAME" | sudo tee -a /etc/hosts > /dev/null
     fi
-    
+
     # Verify the entry was added
     if grep -q "$IP_ADDRESS $DNS_NAME" /etc/hosts; then
         echo -e "${GREEN}✅ Successfully updated /etc/hosts with $IP_ADDRESS $DNS_NAME${NC}"
@@ -731,50 +801,50 @@ update_local_hosts() {
 # Function to configure Bright Cluster Manager
 configure_bcm() {
     echo -e "${BLUE}Configuring Bright Cluster Manager for Run.ai access...${NC}"
-    
+
     # Step 1: Get the HTTPS port from ingress-nginx-controller
     echo -e "${BLUE}Getting HTTPS port from ingress-nginx-controller...${NC}"
     local nginx_ports=$(kubectl -n ingress-nginx get svc ingress-nginx-controller -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}')
-    
+
     if [ -z "$nginx_ports" ]; then
         echo -e "${RED}❌ Error: Could not find HTTPS nodePort in ingress-nginx-controller${NC}"
         return 1
     fi
-    
+
     local https_port=$nginx_ports
     echo -e "${GREEN}✅ Found HTTPS nodePort: $https_port${NC}"
-    
+
     # Step 2: Get the last node name from kubectl get nodes
     echo -e "${BLUE}Getting the last worker node name...${NC}"
     local last_node=$(kubectl get nodes --sort-by=.metadata.name -o jsonpath='{.items[-1:].metadata.name}')
-    
+
     if [ -z "$last_node" ]; then
         echo -e "${RED}❌ Error: Could not find any nodes in the cluster${NC}"
         return 1
     fi
-    
+
     echo -e "${GREEN}✅ Found last node: $last_node${NC}"
-    
+
     # Step 3: Verify the node exists in Bright Cluster Manager
     echo -e "${BLUE}Verifying node exists in Bright Cluster Manager...${NC}"
     if ! cmsh -c "device list" | grep -q "$last_node"; then
         echo -e "${RED}❌ Error: Node $last_node not found in Bright Cluster Manager${NC}"
         return 1
     fi
-    
+
     echo -e "${GREEN}✅ Node $last_node found in Bright Cluster Manager${NC}"
-    
+
     # Step 4: Configure nginx reverse proxy in Bright Cluster Manager
     echo -e "${BLUE}Configuring nginx reverse proxy in Bright Cluster Manager...${NC}"
     local headnode=$(cmsh -c "device list" | grep -i headnode | awk '{print $2}')
-    
+
     if [ -z "$headnode" ]; then
         echo -e "${RED}❌ Error: Could not find headnode in Bright Cluster Manager${NC}"
         return 1
     fi
-    
+
     echo -e "${BLUE}Using headnode: $headnode${NC}"
-    
+
     # Create a temporary file with cmsh commands
     local bcm_temp="$TEMP_DIR/bcm-temp"
     cat > "$bcm_temp" << EOF
@@ -786,16 +856,16 @@ list
 add 443 $last_node $https_port 'runai'
 commit
 EOF
-    
+
     # Execute the cmsh commands from the file
     if cmsh -q -x -f "$bcm_temp"; then
         echo -e "${GREEN}✅ Successfully configured Bright Cluster Manager nginx reverse proxy${NC}"
         echo -e "${GREEN}✅ Run.ai is now accessible via Bright Cluster Manager at https://$DNS_NAME${NC}"
-        
+
         # Show the configured reverse proxy details
         echo -e "${BLUE}Configured reverse proxy details:${NC}"
         echo -e "${YELLOW}$(cmsh -c "device use $headnode; roles; use nginx; nginxreverseproxy; list" | grep -A 1 "$DNS_NAME")${NC}"
-        
+
         return 0
     else
         echo -e "${YELLOW}⚠️ Warning: Could not configure Bright Cluster Manager nginx reverse proxy${NC}"
@@ -832,7 +902,7 @@ if [ "$PATCH_NGINX" = true ]; then
         echo -e "${RED}❌ Error: --ip is required when using --patch-nginx${NC}"
         exit 1
     fi
-    
+
     echo -e "${BLUE}Patching Nginx Ingress Controller with external IP...${NC}"
     if patch_nginx_service; then
         echo -e "${GREEN}✅ NGINX listen to $IP_ADDRESS${NC}"
@@ -862,24 +932,8 @@ fi
 # Setup certificates
 setup_certificates
 
-# Modify the main installation logic to properly handle cluster-only mode
-if [ "$CLUSTER_ONLY" = true ]; then
-    echo -e "${BLUE}Skipping backend installation and only installing Run.ai cluster...${NC}"
-    if install_runai_cluster; then
-        echo -e "${GREEN}✅ Run.ai cluster installation completed${NC}"
-    else
-        echo -e "${RED}❌ Failed to install Run.ai cluster${NC}"
-        exit 1
-    fi
-else
-    # Regular installation flow (backend + cluster)
-    if install_runai_backend && install_runai_cluster; then
-        echo -e "${GREEN}✅ Run.ai installation completed${NC}"
-    else
-        echo -e "${RED}❌ Failed to install Run.ai${NC}"
-        exit 1
-    fi
-fi
+# Install Run.ai
+install_runai
 
 # Update local /etc/hosts file
 update_local_hosts
@@ -905,4 +959,4 @@ if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
     echo
 fi
 
-echo -e "${BLUE}Thank you for using the AI Factory One-Click Installer!${NC}"
+echo -e "${BLUE}Thank you for using the AI Factory One-Click Installer!${NC}"%
