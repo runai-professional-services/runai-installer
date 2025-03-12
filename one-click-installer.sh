@@ -289,7 +289,7 @@ check_runai_installed() {
 
 # Function to patch CoreDNS if internal DNS is enabled
 patch_coredns() {
-    echo -e "${BLUE}[INFO] Patching CoreDNS to add $DNS_NAME -> $IP_ADDRESS${NC}"
+    echo -e "${BLUE}Patching CoreDNS to add $DNS_NAME -> $IP_ADDRESS${NC}"
 
     # First check if the DNS entry already exists
     if ! log_command "kubectl get cm coredns -n kube-system -o yaml" "Check CoreDNS ConfigMap"; then
@@ -300,37 +300,96 @@ patch_coredns() {
     # Get current Corefile
     CURRENT_COREFILE=$(kubectl get cm coredns -n kube-system -o jsonpath='{.data.Corefile}')
     
-    # Replace the IP address
-    NEW_COREFILE=$(echo "$CURRENT_COREFILE" | sed -E "s/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ $DNS_NAME/$IP_ADDRESS $DNS_NAME/g")
-    
-    # Apply the updated ConfigMap
-    PATCH_DATA="
-    data:
-      Corefile: |
-        $NEW_COREFILE
-    "
-
-    if ! log_command "kubectl patch cm coredns -n kube-system --type='merge' --patch=\"$PATCH_DATA\"" "Patch CoreDNS ConfigMap"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to patch CoreDNS ConfigMap${NC}"
-        return 1
+    # Check if our DNS entry already exists
+    if echo "$CURRENT_COREFILE" | grep -q "$DNS_NAME"; then
+        echo -e "${BLUE}DNS entry for $DNS_NAME already exists, updating IP address${NC}"
+        # Replace the IP address for the existing entry
+        NEW_COREFILE=$(echo "$CURRENT_COREFILE" | sed -E "s/[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+ $DNS_NAME/$IP_ADDRESS $DNS_NAME/g")
+        
+        # Create a temporary file with the new Corefile
+        TEMP_COREFILE="${TEMP_DIR}/corefile.tmp"
+        echo "$NEW_COREFILE" > "$TEMP_COREFILE"
+        
+        echo -e "${BLUE}New CoreDNS configuration:${NC}"
+        if ! log_command "cat \"$TEMP_COREFILE\"" "New CoreDNS configuration"; then
+            echo -e "${YELLOW}⚠️ Warning: Could not log new CoreDNS configuration${NC}"
+        fi
+        
+        # Apply the updated ConfigMap
+        if ! log_command "kubectl create configmap coredns -n kube-system --from-file=Corefile=\"$TEMP_COREFILE\" --dry-run=client -o yaml | kubectl apply -f -" "Update CoreDNS ConfigMap"; then
+            echo -e "${YELLOW}⚠️ Warning: Failed to update CoreDNS ConfigMap${NC}"
+            return 1
+        fi
+    else
+        echo -e "${BLUE}No DNS entry found, applying complete Corefile patch${NC}"
+        
+        # Apply the patch with the new DNS entry
+        PATCH_DATA="
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+            lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+          pods insecure
+          fallthrough in-addr.arpa ip6.arpa
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+          prefer_udp
+          max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+        hosts {
+          $IP_ADDRESS $DNS_NAME
+          fallthrough
+        }
+    }
+"
+        
+        # Log the patch data
+        echo -e "${BLUE}Applying CoreDNS patch:${NC}"
+        echo "$PATCH_DATA" > "${TEMP_DIR}/coredns-patch.yaml"
+        if ! log_command "cat \"${TEMP_DIR}/coredns-patch.yaml\"" "CoreDNS patch data"; then
+            echo -e "${YELLOW}⚠️ Warning: Could not log CoreDNS patch data${NC}"
+        fi
+        
+        # Apply the patch
+        if ! log_command "kubectl patch cm coredns -n kube-system --type='merge' --patch=\"$PATCH_DATA\"" "Patch CoreDNS ConfigMap"; then
+            echo -e "${YELLOW}⚠️ Warning: Failed to patch CoreDNS ConfigMap${NC}"
+            return 1
+        fi
     fi
 
     # Restart CoreDNS to apply the changes
-    echo -e "${BLUE}[INFO] Restarting CoreDNS...${NC}"
+    echo -e "${BLUE}Restarting CoreDNS...${NC}"
     if ! log_command "kubectl -n kube-system delete pod -l k8s-app=kube-dns" "Restart CoreDNS pods"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to restart CoreDNS pods, continuing...${NC}"
         return 1
     fi
 
-    # Verify DNS resolution
-    echo -e "${BLUE}[INFO] Verifying DNS resolution...${NC}"
-    if kubectl run -it --rm --restart=Never dns-test --image=busybox -- nslookup $DNS_NAME > /dev/null 2>&1; then
-        echo -e "${GREEN}✅ DNS resolution for $DNS_NAME is working correctly${NC}"
-    else
-        echo -e "${YELLOW}⚠️ Warning: DNS resolution test failed. You may need to manually verify DNS resolution.${NC}"
+    # Wait for CoreDNS pods to be ready
+    echo -e "${BLUE}Waiting for CoreDNS pods to be ready...${NC}"
+    if ! log_command "kubectl -n kube-system wait --for=condition=Ready pod -l k8s-app=kube-dns --timeout=60s" "Wait for CoreDNS pods"; then
+        echo -e "${YELLOW}⚠️ Warning: Timeout waiting for CoreDNS pods to be ready, continuing...${NC}"
     fi
 
-    echo -e "${GREEN}[SUCCESS] CoreDNS updated with $DNS_NAME -> $IP_ADDRESS${NC}"
+    # Verify DNS resolution
+    echo -e "${BLUE}Verifying DNS resolution...${NC}"
+    if ! log_command "kubectl run -it --rm --restart=Never dns-test --image=busybox -- nslookup $DNS_NAME" "Test DNS resolution"; then
+        echo -e "${YELLOW}⚠️ Warning: DNS resolution test failed. You may need to manually verify DNS resolution.${NC}"
+    else
+        echo -e "${GREEN}✅ DNS resolution for $DNS_NAME is working correctly${NC}"
+    fi
+
+    echo -e "${GREEN}✅ CoreDNS updated with $DNS_NAME -> $IP_ADDRESS${NC}"
+    return 0
 }
 
 # Function to patch Nginx Ingress Controller service
