@@ -13,7 +13,7 @@ The Run.ai One-Click Installer is a powerful bash script that automates the depl
 - 🔄 **Complete Run.ai Installation**: Automates the entire Run.ai deployment process
 - 🛠️ **Prerequisite Management**: Installs and configures all necessary components
 - 🔐 **Certificate Management**: Generates self-signed certificates or uses your own
-- 🌐 **DNS Configuration**: Sets up internal DNS or patches your hosts file
+- 🌐 **DNS Configuration**: Sets up internal DNS - patch CoreDNS - 
 - 🚦 **Ingress Control**: Installs and configures Nginx Ingress Controller
 - 📊 **Monitoring**: Optional Prometheus Stack installation
 - 🖥️ **GPU Support**: Optional NVIDIA GPU Operator installation
