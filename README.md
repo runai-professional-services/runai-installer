@@ -58,7 +58,6 @@ one-click-installer.sh --dns www.192.168.0.1.sslip.io  --runai-version 2.20.22 -
 |--------|-------------|
 | `--dns DNS_NAME` | Specify DNS name for Run.ai certificates |
 | `--runai-version VER` | Specify Run.ai version to install |
-| `--runai-only` | Skip prerequisites and directly install Run.ai |
 | `--internal-dns` | Configure internal DNS |
 | `--ip IP_ADDRESS` | Specify IP address (required with --internal-dns) |
 | `--cert CERT_FILE` | Use provided certificate file |
@@ -73,7 +72,7 @@ one-click-installer.sh --dns www.192.168.0.1.sslip.io  --runai-version 2.20.22 -
 
 ## 🔍 Prerequisites
 
-- Kubernetes cluster (unless using `--runai-only` with an existing cluster)
+- Kubernetes cluster
 - `kubectl` configured to access your cluster
 - `helm` installed
 - `jq` installed for JSON processing
