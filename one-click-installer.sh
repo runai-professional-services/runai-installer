@@ -827,7 +827,7 @@ configure_bcm() {
     
     # Step 3: Verify the node exists in Bright Cluster Manager
     echo -e "${BLUE}Verifying node exists in Bright Cluster Manager...${NC}"
-    if ! cmsh -c "device list" | grep -q "$last_node"; then
+    if ! cmsh -c "device list" | grep -i -q "$last_node"; then
         echo -e "${RED}❌ Error: Node $last_node not found in Bright Cluster Manager${NC}"
         return 1
     fi
