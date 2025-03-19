@@ -434,18 +434,23 @@ install_knative() {
         --patch '{"data":{"ingress-class":"kourier.ingress.networking.knative.dev"}}' > /dev/null 2>&1; then
         echo -e "${YELLOW}⚠️ Warning: Failed to configure Knative networking, continuing...${NC}"
     fi
-    if ! kubectl patch configmap/config-autoscaler \
+
+    # Configure autoscaler and features
+    echo -e "${BLUE}Configuring Knative autoscaler and features...${NC}"
+    if ! log_command "kubectl patch configmap/config-autoscaler \
         --namespace knative-serving \
         --type merge \
-        --patch '{"data":{"enable-scale-to-zero":"true"}}' > /dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to configure Knative autoscaler, continuing...${NC}"
+        --patch '{\"data\":{\"enable-scale-to-zero\":\"true\"}}'" "Configure Knative autoscaler"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to configure Knative autoscaler${NC}"
     fi
-    if ! kubectl patch configmap/config-features \
+
+    if ! log_command "kubectl patch configmap/config-features \
         --namespace knative-serving \
         --type merge \
-        --patch '{"data":{"kubernetes.podspec-schedulername":"enabled","kubernetes.podspec-affinity":"enabled","kubernetes.podspec-tolerations":"enabled","kubernetes.podspec-volumes-emptydir":"enabled","kubernetes.podspec-securitycontext":"enabled","kubernetes.containerspec-addcapabilities":"enabled","kubernetes.podspec-persistent-volume-claim":"enabled","kubernetes.podspec-persistent-volume-write":"enabled","multi-container":"enabled","kubernetes.podspec-init-containers":"enabled"}}' > /dev/null 2>&1; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to configure Knative features, continuing...${NC}"
+        --patch '{\"data\":{\"kubernetes.podspec-schedulername\":\"enabled\",\"kubernetes.podspec-affinity\":\"enabled\",\"kubernetes.podspec-tolerations\":\"enabled\",\"kubernetes.podspec-volumes-emptydir\":\"enabled\",\"kubernetes.podspec-securitycontext\":\"enabled\",\"kubernetes.containerspec-addcapabilities\":\"enabled\",\"kubernetes.podspec-persistent-volume-claim\":\"enabled\",\"kubernetes.podspec-persistent-volume-write\":\"enabled\",\"multi-container\":\"enabled\",\"kubernetes.podspec-init-containers\":\"enabled\"}}'" "Configure Knative features"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to configure Knative features${NC}"
     fi
+
     echo -e "${GREEN}✅ Knative installation completed${NC}"
 }
 
@@ -565,28 +570,33 @@ install_prerequisites() {
 
 # Function to generate or use provided certificates
 setup_certificates() {
-    # Create certificates directory
+    # Create certificates directory with timestamp
+    TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     CERT_DIR="./certificates"
+    CERTS_BACKUP_DIR="$CERT_DIR/certs-$TIMESTAMP"
     CURRENT_DIR="$(pwd)"
     
     # Check if user provided certificates
     if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ]; then
         echo -e "${BLUE}Using provided certificate and key files...${NC}"
         
-        # Create certificates directory if it doesn't exist
-        mkdir -p "$CERT_DIR"
+        # Create backup directory
+        mkdir -p "$CERTS_BACKUP_DIR"
         
-        # Copy provided certificate and key to the certificates directory
-        cp "$CERT_FILE" "$CERT_DIR/runai.crt"
-        cp "$KEY_FILE" "$CERT_DIR/runai.key"
-        
-        # Set certificate paths
-        export CERT="$CERT_DIR/runai.crt"
-        export KEY="$CERT_DIR/runai.key"
+        # Set certificate paths to the original files
+        export CERT="$CERT_FILE"
+        export KEY="$KEY_FILE"
         export FULL="$CERT_FILE"  # Use the provided certificate as the full chain
         
-        echo -e "${GREEN}✅ Using provided certificates${NC}"
+        # Backup the certificates (don't create secrets here)
+        echo -e "${BLUE}Backing up certificates to $CERTS_BACKUP_DIR...${NC}"
+        cp "$CERT_FILE" "$CERTS_BACKUP_DIR/runai.crt"
+        cp "$KEY_FILE" "$CERTS_BACKUP_DIR/runai.key"
+        cp "$CERT_FILE" "$CERTS_BACKUP_DIR/full-chain.pem"
+        
+        echo -e "${GREEN}✅ Using provided certificates and backed up to $CERTS_BACKUP_DIR${NC}"
     else
+        # Generate self-signed certificates
         echo -e "${BLUE}Creating certificates in: $CERT_DIR${NC}"
         mkdir -p "$CERT_DIR"
         cd "$CERT_DIR"
@@ -603,7 +613,7 @@ setup_certificates() {
 
         # Generate root certificate
         if ! openssl req -x509 -new -nodes -key rootCA.key -passin env:OPENSSL_PASSWORD -sha256 -days 730 \
-            -out rootCA.pem -subj "/C=US/ST=IL/L=TLV/O=Jupyter/CN=ww"; then
+            -out rootCA.pem -subj "/C=US/ST=IL/L=TLV/O=Jupyter/CN=self-signed-nvidia"; then
             echo -e "${RED}❌ Failed to generate root certificate${NC}"
             exit 1
         fi
@@ -652,12 +662,17 @@ EOF
             echo -e "${GREEN}✅ Certificate verified successfully${NC}"
         fi
 
-        # Set certificate paths with full directory
+        # After successful generation, copy to backup directory
+        mkdir -p "$CERTS_BACKUP_DIR"
+        cp runai.crt "$CERTS_BACKUP_DIR/"
+        cp runai.key "$CERTS_BACKUP_DIR/"
+        cp full-chain.pem "$CERTS_BACKUP_DIR/"
+        
+        # Set certificate paths
         export CERT="$CERT_DIR/runai.crt"
         export KEY="$CERT_DIR/runai.key"
         export FULL="$CERT_DIR/full-chain.pem"
-
-        # Return to original directory
+        
         cd "$CURRENT_DIR"
     fi
 }
@@ -680,40 +695,28 @@ install_runai() {
         if [ "$NO_CERT" != true ]; then
             echo -e "${BLUE}Creating/updating TLS secrets...${NC}"
             
-            # Check if certificates exist
-            if [ ! -f "$CERT" ] || [ ! -f "$KEY" ] || [ ! -f "$FULL" ]; then
-                echo -e "${RED}❌ Error: Certificate files not found:${NC}"
-                [ ! -f "$CERT" ] && echo -e "${RED}  - Certificate file not found: $CERT${NC}"
-                [ ! -f "$KEY" ] && echo -e "${RED}  - Key file not found: $KEY${NC}"
-                [ ! -f "$FULL" ] && echo -e "${RED}  - Full chain file not found: $FULL${NC}"
-                echo -e "${YELLOW}This may be due to an error in certificate generation.${NC}"
-                echo -e "${YELLOW}Continuing with installation, but you may need to manually configure certificates later.${NC}"
-            else
-                echo -e "${GREEN}✅ Certificate files found${NC}"
-                
-                # Delete existing secrets first to ensure clean update
-                kubectl -n runai-backend delete secret runai-backend-tls 2>/dev/null || true
-                kubectl -n runai-backend delete secret runai-ca-cert 2>/dev/null || true
-                kubectl -n runai delete secret runai-ca-cert 2>/dev/null || true
-                
-                # Create secrets using the full paths with better error handling
-                if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=\"$CERT\" --key=\"$KEY\"" "Create TLS secret in runai-backend namespace"; then
-                    echo -e "${RED}❌ Failed to create TLS secret. Certificate or key may be invalid.${NC}"
-                    echo -e "${YELLOW}Continuing with installation, but you may need to manually configure certificates later.${NC}"
-                fi
-                
-                if ! log_command "kubectl -n runai-backend create secret generic runai-ca-cert --from-file=runai-ca.pem=\"$FULL\"" "Create CA cert secret in runai-backend namespace"; then
-                    echo -e "${RED}❌ Failed to create CA cert secret in runai-backend namespace.${NC}"
-                    echo -e "${YELLOW}Continuing with installation, but you may need to manually configure certificates later.${NC}"
-                fi
-                
-                if ! log_command "kubectl -n runai create secret generic runai-ca-cert --from-file=runai-ca.pem=\"$FULL\"" "Create CA cert secret in runai namespace"; then
-                    echo -e "${RED}❌ Failed to create CA cert secret in runai namespace.${NC}"
-                    echo -e "${YELLOW}Continuing with installation, but you may need to manually configure certificates later.${NC}"
-                fi
-                
-                echo -e "${GREEN}✅ Certificate secrets created/updated${NC}"
+            # Delete existing secrets first
+            kubectl -n runai-backend delete secret runai-backend-tls 2>/dev/null || true
+            kubectl -n runai-backend delete secret runai-ca-cert 2>/dev/null || true
+            kubectl -n runai delete secret runai-ca-cert 2>/dev/null || true
+            
+            # Create new secrets
+            if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY" "Create TLS secret"; then
+                echo -e "${RED}❌ Failed to create TLS secret${NC}"
+                exit 1
             fi
+            
+            if ! log_command "kubectl create secret generic runai-ca-cert -n runai-backend --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai-backend namespace"; then
+                echo -e "${RED}❌ Failed to create CA cert secret in runai-backend namespace${NC}"
+                exit 1
+            fi
+            
+            if ! log_command "kubectl create secret generic runai-ca-cert -n runai --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai namespace"; then
+                echo -e "${RED}❌ Failed to create CA cert secret in runai namespace${NC}"
+                exit 1
+            fi
+            
+            echo -e "${GREEN}✅ Certificate secrets created successfully${NC}"
         else
             echo -e "${BLUE}Skipping certificate secrets creation as requested with --no-cert flag...${NC}"
         fi
