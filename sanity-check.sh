@@ -7,6 +7,26 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Function to show usage
+show_usage() {
+    echo -e "\nUsage: $0 [OPTIONS]"
+    echo -e "\nOptions:"
+    echo "  --cert CERT_FILE       Certificate file for TLS"
+    echo "  --key KEY_FILE         Key file for TLS"
+    echo "  --dns DNS_NAME         DNS name to test"
+    echo "  --cacert CA_FILE       CA certificate file for SSL verification (optional)"
+    echo "  --storage             Run only storage tests"
+    echo "  --class STORAGE_CLASS  Specify StorageClass for storage tests (optional)"
+    echo "  --hardware            Validate minimum hardware requirements (24 cores, 32GB RAM)"
+    echo -e "\nExamples:"
+    echo "  $0 --cert runai.crt --key runai.key --dns runai.example.com"
+    echo "  $0 --cert runai.crt --key runai.key --dns runai.example.com --cacert ca.pem"
+    echo "  $0 --storage                    # Test storage with default StorageClass"
+    echo "  $0 --storage --class local-path # Test storage with specific StorageClass"
+    echo "  $0 --hardware                   # Check hardware requirements only"
+    exit 1
+}
+
 # Create logs directory
 LOGS_DIR="./logs"
 mkdir -p "$LOGS_DIR"
@@ -48,25 +68,6 @@ cleanup() {
 # Set up trap to ensure cleanup runs on script exit
 trap cleanup EXIT
 
-# Function to show usage
-show_usage() {
-    echo -e "${BLUE}Usage: $0 [OPTIONS]${NC}"
-    echo "Options:"
-    echo "  --cert CERT_FILE       Certificate file for TLS"
-    echo "  --key KEY_FILE         Key file for TLS"
-    echo "  --dns DNS_NAME         DNS name to test"
-    echo "  --cacert CA_FILE       CA certificate file for SSL verification (optional)"
-    echo "  --storage              Run only storage tests"
-    echo "  --class STORAGE_CLASS  Specify StorageClass for storage tests (optional)"
-    echo ""
-    echo "Examples:"
-    echo "  $0 --cert runai.crt --key runai.key --dns runai.kirson.local"
-    echo "  $0 --cert runai.crt --key runai.key --dns runai.kirson.local --cacert ca.pem"
-    echo "  $0 --storage                    # Test storage with default StorageClass"
-    echo "  $0 --storage --class local-path # Test storage with specific StorageClass"
-    exit 1
-}
-
 # Function to log commands and their output
 log_command() {
     local cmd="$1"
@@ -85,6 +86,133 @@ log_command() {
         local exit_code=$?
         echo "Status: FAILED (exit code: $exit_code)" >> "$LOG_FILE"
         return $exit_code
+    fi
+}
+
+# Function to run hardware check
+run_hardware_check() {
+    echo -e "\n${BLUE}Running hardware requirements check...${NC}"
+    
+    # Get all worker nodes (excluding nodes with master/control-plane labels)
+    WORKER_NODES=$(kubectl get nodes --no-headers | grep -v -E "master|control-plane" | awk '{print $1}')
+    
+    if [ -z "$WORKER_NODES" ]; then
+        echo -e "${RED}❌ No worker nodes found in the cluster${NC}"
+        return 1
+    fi
+
+    TOTAL_CPU=0
+    TOTAL_RAM=0
+
+    echo -e "\n${BLUE}Analyzing worker nodes:${NC}"
+    echo -e "----------------------------------------"
+    
+    # Loop through each worker node
+    while read -r node; do
+        echo -e "\n${BLUE}Worker Node: ${GREEN}$node${NC}"
+        
+        # Get CPU cores directly from capacity
+        CPU_CORES=$(kubectl get node "$node" -o jsonpath='{.status.capacity.cpu}')
+        if [ -z "$CPU_CORES" ]; then
+            echo -e "${RED}Failed to get CPU capacity for node $node${NC}"
+            continue
+        fi
+        TOTAL_CPU=$((TOTAL_CPU + CPU_CORES))
+        
+        # Get RAM from capacity in Ki and convert to GB
+        RAM_RAW=$(kubectl get node "$node" -o jsonpath='{.status.capacity.memory}')
+        if [ -z "$RAM_RAW" ]; then
+            echo -e "${RED}Failed to get memory capacity for node $node${NC}"
+            continue
+        fi
+        
+        # Convert memory to GB (handling Ki suffix)
+        if [[ $RAM_RAW == *Ki ]]; then
+            RAM_GB=$((${RAM_RAW%Ki} / 1024 / 1024))
+        elif [[ $RAM_RAW == *Mi ]]; then
+            RAM_GB=$((${RAM_RAW%Mi} / 1024))
+        elif [[ $RAM_RAW == *Gi ]]; then
+            RAM_GB=${RAM_RAW%Gi}
+        else
+            # Assume the value is in Ki if no suffix
+            RAM_GB=$((RAM_RAW / 1024 / 1024))
+        fi
+        
+        TOTAL_RAM=$((TOTAL_RAM + RAM_GB))
+        
+        # Print node resources in requested format
+        echo -e "└─ CPU Cores: ${GREEN}$CPU_CORES${NC}"
+        echo -e "└─ RAM: ${GREEN}${RAM_GB}GB${NC}"
+        
+        # Get GPU information
+        GPU_COUNT=$(kubectl get node "$node" -o jsonpath='{.status.allocatable.nvidia\.com/gpu}' 2>/dev/null)
+        if [ -n "$GPU_COUNT" ]; then
+            echo -e "└─ GPU Count: ${GREEN}$GPU_COUNT${NC}"
+            
+            # Debug: Print all annotations to log
+            echo "All node annotations:" >> "$LOG_FILE"
+            kubectl get node "$node" -o jsonpath='{.metadata.annotations}' >> "$LOG_FILE"
+            
+            # Try different ways to get GPU type
+            GPU_TYPE=$(kubectl get node "$node" -o jsonpath='{.metadata.annotations.nvidia\.com/gpu\.product}' 2>/dev/null || \
+                      kubectl get node "$node" -o jsonpath='{.metadata.annotations.nvidia\.com/gpu-product}' 2>/dev/null || \
+                      kubectl get node "$node" -o custom-columns=GPU:.metadata.annotations.nvidia\.com/gpu\.product --no-headers 2>/dev/null)
+            
+            # Debug: Print raw GPU type value
+            echo "Raw GPU Type value: $GPU_TYPE" >> "$LOG_FILE"
+            
+            if [ -n "$GPU_TYPE" ]; then
+                echo -e "└─ Type: ${GREEN}$GPU_TYPE${NC}"
+            else
+                # If GPU type not found in annotations, try describing node and grep
+                GPU_TYPE=$(kubectl describe node "$node" | grep -i "nvidia.com/gpu.product" | awk -F= '{print $2}' | tr -d ' ')
+                if [ -n "$GPU_TYPE" ]; then
+                    echo -e "└─ Type: ${GREEN}$GPU_TYPE${NC}"
+                fi
+            fi
+        fi
+        
+        # Log raw values for debugging
+        echo "Debug - Raw values for $node:" >> "$LOG_FILE"
+        echo "CPU Capacity: $(kubectl get node "$node" -o jsonpath='{.status.capacity.cpu}')" >> "$LOG_FILE"
+        echo "Memory Raw: $RAM_RAW" >> "$LOG_FILE"
+        echo "GPU Count: $GPU_COUNT" >> "$LOG_FILE"
+        echo "GPU Type: $GPU_TYPE" >> "$LOG_FILE"
+    done <<< "$WORKER_NODES"
+    
+    if [ "$GPU_FOUND" = false ]; then
+        echo -e "${YELLOW}No GPUs found in any worker nodes${NC}"
+    fi
+
+    echo -e "\n${BLUE}Cluster Total Resources:${NC}"
+    echo -e "----------------------------------------"
+    echo -e "Total Worker CPU Cores: ${GREEN}$TOTAL_CPU${NC} (minimum required: 24)"
+    echo -e "Total Worker RAM: ${GREEN}${TOTAL_RAM}GB${NC} (minimum required: 32GB)"
+    
+    # Check if requirements are met
+    REQUIREMENTS_MET=true
+    
+    if [ "$TOTAL_CPU" -lt 24 ]; then
+        echo -e "\n${RED}❌ Insufficient total CPU cores across worker nodes${NC}"
+        echo -e "${RED}Required: 24 cores${NC}"
+        echo -e "${RED}Available: $TOTAL_CPU cores${NC}"
+        REQUIREMENTS_MET=false
+    fi
+    
+    if [ "$TOTAL_RAM" -lt 32 ]; then
+        echo -e "\n${RED}❌ Insufficient total RAM across worker nodes${NC}"
+        echo -e "${RED}Required: 32GB${NC}"
+        echo -e "${RED}Available: ${TOTAL_RAM}GB${NC}"
+        REQUIREMENTS_MET=false
+    fi
+    
+    if [ "$REQUIREMENTS_MET" = true ]; then
+        echo -e "\n${GREEN}✅ Hardware requirements met:${NC}"
+        echo -e "✓ Total Worker CPU Cores: $TOTAL_CPU (exceeds minimum: 24)"
+        echo -e "✓ Total Worker RAM: ${TOTAL_RAM}GB (exceeds minimum: 32GB)"
+        return 0
+    else
+        return 1
     fi
 }
 
@@ -136,6 +264,11 @@ while [[ $# -gt 0 ]]; do
             VALID_ARGS=true
             shift 2
             ;;
+        --hardware)
+            HARDWARE_CHECK=true
+            VALID_ARGS=true
+            shift
+            ;;
         -h|--help)
             show_usage
             ;;
@@ -157,19 +290,33 @@ if [ "$VALID_ARGS" = false ]; then
 fi
 
 # Validate required parameters
-if [ "$STORAGE_ONLY" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
-    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage${NC}"
+if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
+    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage or --hardware${NC}"
     show_usage
 fi
 
 echo -e "${BLUE}Starting sanity checks...${NC}"
 
-# Create test namespace
-TEST_NS="sanity-test-$(date +%s)"
-echo -e "${BLUE}Creating test namespace: $TEST_NS${NC}"
-if ! log_command "kubectl create namespace $TEST_NS" "Create test namespace"; then
-    echo -e "${RED}❌ Failed to create test namespace${NC}"
-    exit 1
+# Main execution flow
+if [ "$HARDWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ -z "$CERT_FILE" ]; then
+    # Run only hardware check without creating namespace
+    if ! run_hardware_check; then
+        echo -e "${RED}❌ Hardware validation failed${NC}"
+        exit 1
+    fi
+    echo -e "\n${GREEN}✅ Hardware check completed successfully!${NC}"
+    exit 0
+fi
+
+# Only create namespace if running storage or TLS tests
+if [ "$HARDWARE_CHECK" != "true" ] || [ "$STORAGE_ONLY" = "true" ] || [ -n "$CERT_FILE" ]; then
+    # Create test namespace
+    TEST_NS="sanity-test-$(date +%s)"
+    echo -e "${BLUE}Creating test namespace: $TEST_NS${NC}"
+    if ! log_command "kubectl create namespace $TEST_NS" "Create test namespace"; then
+        echo -e "${RED}❌ Failed to create test namespace${NC}"
+        exit 1
+    fi
 fi
 
 # Only run TLS/ingress tests if not in storage-only mode
@@ -481,13 +628,57 @@ EOF
     echo -e "${GREEN}✅ Storage test completed${NC}"
 }
 
-# Main execution flow
+# Add this function near the other function definitions:
+
+check_jfrog_secret() {
+    if [ ! -f "./jfrog.yaml" ]; then
+        echo -e "${YELLOW}⚠️ Warning: jfrog.yaml file not found in current directory${NC}"
+        echo -e "${BLUE}Note: This file is required for accessing private registries${NC}"
+        echo -e "${BLUE}Skipping repository secret configuration...${NC}"
+        return 1
+    fi
+    
+    # Try to apply the secret
+    if ! log_command "kubectl apply -f ./jfrog.yaml -n $TEST_NS" "Apply repository secret"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to apply repository secret${NC}"
+        echo -e "${BLUE}Note: This might affect access to private container images${NC}"
+        return 1
+    fi
+    
+    echo -e "${GREEN}✅ Repository secret applied successfully${NC}"
+    return 0
+}
+
+# Then modify the main execution flow to include this check before creating deployments:
+
+# In the main script, before creating any deployments, add:
+
+if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ]; then
+    # Check for jfrog secret
+    check_jfrog_secret
+    # Continue with other operations regardless of secret status
+fi
+
+# Run other tests as needed
 if [ "$STORAGE_ONLY" = "true" ]; then
     echo -e "${BLUE}Running storage-only tests...${NC}"
     run_storage_tests
 else
-    # Run storage tests after ingress tests
-    run_storage_tests
+    if [ -n "$CERT_FILE" ]; then
+        # Run TLS/ingress tests
+        # ... existing TLS/ingress test code ...
+        # Run storage tests after ingress tests
+        run_storage_tests
+    fi
+fi
+
+# Run hardware check if requested alongside other tests
+if [ "$HARDWARE_CHECK" = "true" ]; then
+    if ! run_hardware_check; then
+        echo -e "${RED}❌ Hardware validation failed${NC}"
+        cleanup
+        exit 1
+    fi
 fi
 
 # Print test summary
