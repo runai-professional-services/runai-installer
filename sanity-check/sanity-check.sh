@@ -377,19 +377,34 @@ fi
 
 echo -e "${BLUE}Starting sanity checks...${NC}"
 
-# Main execution flow
-if [ "$DIAG_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
-    # Run only diagnostics check without creating namespace
+# Run diagnostics if requested
+if [ "$DIAG_CHECK" = "true" ]; then
     if ! run_diagnostics_check; then
         echo -e "${RED}❌ Diagnostics check failed${NC}"
         exit 1
     fi
-    echo -e "\n${GREEN}✅ Diagnostics check completed successfully!${NC}"
-    exit 0
+    # Only exit if this is the only check requested
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+        echo -e "\n${GREEN}✅ Diagnostics check completed successfully!${NC}"
+        exit 0
+    fi
 fi
 
-# Only create namespace if running storage or TLS tests
-if [ "$HARDWARE_CHECK" != "true" ] || [ "$STORAGE_ONLY" = "true" ] || [ -n "$CERT_FILE" ]; then
+# Run hardware check if requested
+if [ "$HARDWARE_CHECK" = "true" ]; then
+    if ! run_hardware_check; then
+        echo -e "${RED}❌ Hardware validation failed${NC}"
+        exit 1
+    fi
+    # Only exit if this is the only check requested
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$DIAG_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+        echo -e "\n${GREEN}✅ Hardware check completed successfully!${NC}"
+        exit 0
+    fi
+fi
+
+# Only proceed with namespace creation if running storage or TLS tests
+if [ "$STORAGE_ONLY" = "true" ] || [ -n "$CERT_FILE" ]; then
     # Create test namespace
     TEST_NS="sanity-test-$(date +%s)"
     echo -e "${BLUE}Creating test namespace: $TEST_NS${NC}"
@@ -397,20 +412,19 @@ if [ "$HARDWARE_CHECK" != "true" ] || [ "$STORAGE_ONLY" = "true" ] || [ -n "$CER
         echo -e "${RED}❌ Failed to create test namespace${NC}"
         exit 1
     fi
-fi
 
-# Only run TLS/ingress tests if not in storage-only mode
-if [ "$STORAGE_ONLY" != "true" ]; then
-    # Create TLS secret
-    echo -e "${BLUE}Creating TLS secret...${NC}"
-    if ! log_command "kubectl create secret tls sanity-tls -n $TEST_NS --cert=$CERT_FILE --key=$KEY_FILE" "Create TLS secret"; then
-        echo -e "${RED}❌ Failed to create TLS secret${NC}"
-        exit 1
-    fi
+    # Only run TLS/ingress tests if not in storage-only mode
+    if [ "$STORAGE_ONLY" != "true" ] && [ -n "$CERT_FILE" ]; then
+        # Create TLS secret
+        echo -e "${BLUE}Creating TLS secret...${NC}"
+        if ! log_command "kubectl create secret tls sanity-tls -n $TEST_NS --cert=$CERT_FILE --key=$KEY_FILE" "Create TLS secret"; then
+            echo -e "${RED}❌ Failed to create TLS secret${NC}"
+            exit 1
+        fi
 
-    # Create test service and deployment
-    echo -e "${BLUE}Creating test deployment and service...${NC}"
-    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
+        # Create test service and deployment
+        echo -e "${BLUE}Creating test deployment and service...${NC}"
+        cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -445,9 +459,9 @@ spec:
     app: nginx-test
 EOF
 
-    # Create ingress
-    echo -e "${BLUE}Creating test ingress...${NC}"
-    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
+        # Create ingress
+        echo -e "${BLUE}Creating test ingress...${NC}"
+        cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -475,35 +489,35 @@ spec:
               number: 80
 EOF
 
-    # Wait for deployment to be ready
-    echo -e "${BLUE}Waiting for test deployment to be ready...${NC}"
-    if ! log_command "kubectl wait --for=condition=available deployment/nginx-test -n $TEST_NS --timeout=60s" "Wait for deployment"; then
-        echo -e "${RED}❌ Deployment failed to become ready${NC}"
-        exit 1
-    fi
-
-    # Test 1: External curl with SSL verification
-    echo -e "${BLUE}Testing external HTTPS access...${NC}"
-    echo -e "${BLUE}Performing curl test to https://$DNS_NAME/sanity-test${NC}"
-    if [ -n "$CA_CERT" ]; then
-        echo -e "${BLUE}Using CA certificate for SSL verification${NC}"
-        if ! log_command "curl -v --cacert $CA_CERT https://$DNS_NAME/sanity-test" "External HTTPS test with SSL verification"; then
-            echo -e "${YELLOW}⚠️ SSL verification failed as expected (no valid CA cert)${NC}"
-        else
-            echo -e "${GREEN}✅ External HTTPS test successful${NC}"
+        # Wait for deployment to be ready
+        echo -e "${BLUE}Waiting for test deployment to be ready...${NC}"
+        if ! log_command "kubectl wait --for=condition=available deployment/nginx-test -n $TEST_NS --timeout=60s" "Wait for deployment"; then
+            echo -e "${RED}❌ Deployment failed to become ready${NC}"
+            exit 1
         fi
-    else
-        echo -e "${BLUE}Testing without CA certificate (expecting SSL verification failure)${NC}"
-        if ! log_command "curl -v https://$DNS_NAME/sanity-test" "External HTTPS test without CA cert"; then
-            echo -e "${YELLOW}⚠️ SSL verification failed as expected (no valid CA cert)${NC}"
-        else
-            echo -e "${RED}❌ Unexpected success: SSL verification should have failed${NC}"
-        fi
-    fi
 
-    # Test 2: Internal pod test
-    echo -e "${BLUE}Testing internal pod access...${NC}"
-    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
+        # Test 1: External curl with SSL verification
+        echo -e "${BLUE}Testing external HTTPS access...${NC}"
+        echo -e "${BLUE}Performing curl test to https://$DNS_NAME/sanity-test${NC}"
+        if [ -n "$CA_CERT" ]; then
+            echo -e "${BLUE}Using CA certificate for SSL verification${NC}"
+            if ! log_command "curl -v --cacert $CA_CERT https://$DNS_NAME/sanity-test" "External HTTPS test with SSL verification"; then
+                echo -e "${YELLOW}⚠️ SSL verification failed as expected (no valid CA cert)${NC}"
+            else
+                echo -e "${GREEN}✅ External HTTPS test successful${NC}"
+            fi
+        else
+            echo -e "${BLUE}Testing without CA certificate (expecting SSL verification failure)${NC}"
+            if ! log_command "curl -v https://$DNS_NAME/sanity-test" "External HTTPS test without CA cert"; then
+                echo -e "${YELLOW}⚠️ SSL verification failed as expected (no valid CA cert)${NC}"
+            else
+                echo -e "${RED}❌ Unexpected success: SSL verification should have failed${NC}"
+            fi
+        fi
+
+        # Test 2: Internal pod test
+        echo -e "${BLUE}Testing internal pod access...${NC}"
+        cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
 apiVersion: v1
 kind: Pod
 metadata:
@@ -518,246 +532,48 @@ spec:
     - "3600"
 EOF
 
-    # Wait for the test pod to be ready
-    echo -e "${BLUE}Waiting for test pod to be ready...${NC}"
-    if ! log_command "kubectl wait --for=condition=ready pod/curl-test -n $TEST_NS --timeout=60s" "Wait for test pod"; then
-        echo -e "${RED}❌ Test pod failed to become ready${NC}"
-        exit 1
-    fi
-
-    # Copy the certificate to the pod
-    echo -e "${BLUE}Copying certificate to test pod...${NC}"
-    if ! log_command "kubectl cp $CERT_FILE $TEST_NS/curl-test:/tmp/cert.pem -c curl" "Copy certificate to pod"; then
-        echo -e "${RED}❌ Failed to copy certificate to pod${NC}"
-        exit 1
-    fi
-
-    # Test internal HTTPS access
-    echo -e "${BLUE}Testing internal HTTPS access...${NC}"
-    if [ -n "$CA_CERT" ]; then
-        echo -e "${BLUE}Copying CA certificate to test pod...${NC}"
-        if ! log_command "kubectl cp $CA_CERT $TEST_NS/curl-test:/tmp/ca.pem -c curl" "Copy CA certificate to pod"; then
-            echo -e "${RED}❌ Failed to copy CA certificate to pod${NC}"
+        # Wait for the test pod to be ready
+        echo -e "${BLUE}Waiting for test pod to be ready...${NC}"
+        if ! log_command "kubectl wait --for=condition=ready pod/curl-test -n $TEST_NS --timeout=60s" "Wait for test pod"; then
+            echo -e "${RED}❌ Test pod failed to become ready${NC}"
             exit 1
         fi
-        
-        if ! log_command "kubectl exec -n $TEST_NS curl-test -- curl -v --cacert /tmp/ca.pem https://$DNS_NAME/sanity-test" "Internal HTTPS test with SSL verification"; then
-            echo -e "${RED}❌ Internal HTTPS test failed${NC}"
+
+        # Copy the certificate to the pod
+        echo -e "${BLUE}Copying certificate to test pod...${NC}"
+        if ! log_command "kubectl cp $CERT_FILE $TEST_NS/curl-test:/tmp/cert.pem -c curl" "Copy certificate to pod"; then
+            echo -e "${RED}❌ Failed to copy certificate to pod${NC}"
+            exit 1
+        fi
+
+        # Test internal HTTPS access
+        echo -e "${BLUE}Testing internal HTTPS access...${NC}"
+        if [ -n "$CA_CERT" ]; then
+            echo -e "${BLUE}Copying CA certificate to test pod...${NC}"
+            if ! log_command "kubectl cp $CA_CERT $TEST_NS/curl-test:/tmp/ca.pem -c curl" "Copy CA certificate to pod"; then
+                echo -e "${RED}❌ Failed to copy CA certificate to pod${NC}"
+                exit 1
+            fi
+            
+            if ! log_command "kubectl exec -n $TEST_NS curl-test -- curl -v --cacert /tmp/ca.pem https://$DNS_NAME/sanity-test" "Internal HTTPS test with SSL verification"; then
+                echo -e "${RED}❌ Internal HTTPS test failed${NC}"
+            else
+                echo -e "${GREEN}✅ Internal HTTPS test successful${NC}"
+            fi
         else
-            echo -e "${GREEN}✅ Internal HTTPS test successful${NC}"
-        fi
-    else
-        echo -e "${BLUE}Testing without CA certificate (expecting SSL verification failure)${NC}"
-        if ! log_command "kubectl exec -n $TEST_NS curl-test -- curl -v https://$DNS_NAME/sanity-test" "Internal HTTPS test without CA cert"; then
-            echo -e "${YELLOW}⚠️ SSL verification failed as expected (no valid CA cert)${NC}"
-        else
-            echo -e "${RED}❌ Unexpected success: SSL verification should have failed${NC}"
-        fi
-    fi
-fi
-
-# Function to run storage tests
-run_storage_tests() {
-    echo -e "${BLUE}Testing storage functionality...${NC}"
-
-    # Get storage class
-    if [ -n "$STORAGE_CLASS" ]; then
-        # Check if specified storage class exists
-        if ! kubectl get storageclass "$STORAGE_CLASS" &>/dev/null; then
-            echo -e "${RED}❌ StorageClass $STORAGE_CLASS not found${NC}"
-            exit 1
-        fi
-        SC_TO_USE="$STORAGE_CLASS"
-        echo -e "${BLUE}Using specified StorageClass: $SC_TO_USE${NC}"
-    else
-        # Get default storage class
-        SC_TO_USE=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}')
-        if [ -z "$SC_TO_USE" ]; then
-            echo -e "${RED}❌ No default StorageClass found${NC}"
-            exit 1
-        fi
-        echo -e "${BLUE}Using default StorageClass: $SC_TO_USE${NC}"
-    fi
-
-    # Create PVC first
-    echo -e "${BLUE}Creating PVC...${NC}"
-    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: sanity-pvc
-  namespace: $TEST_NS
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 1Gi
-  storageClassName: $SC_TO_USE
-EOF
-
-    # Create pod to test storage immediately after PVC
-    echo -e "${BLUE}Creating storage test pod...${NC}"
-    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
-apiVersion: v1
-kind: Pod
-metadata:
-  name: storage-test
-  namespace: $TEST_NS
-spec:
-  securityContext:
-    fsGroup: 1001
-  containers:
-  - name: storage-test
-    image: ubuntu:latest
-    command: 
-    - sleep
-    - "3600"
-    securityContext:
-      runAsUser: 1001
-      runAsGroup: 1001
-    volumeMounts:
-    - name: storage-volume
-      mountPath: /data
-  volumes:
-  - name: storage-volume
-    persistentVolumeClaim:
-      claimName: sanity-pvc
-EOF
-
-    # Now wait for both PVC and Pod
-    echo -e "${BLUE}Waiting for PVC to be bound...${NC}"
-    # First, wait for the PVC to exist
-    for i in {1..30}; do
-        if kubectl get pvc -n "$TEST_NS" sanity-pvc &>/dev/null; then
-            break
-        fi
-        sleep 2
-    done
-
-    # Then check its status
-    PVC_STATUS=$(kubectl get pvc -n "$TEST_NS" sanity-pvc -o jsonpath='{.status.phase}')
-    if [ "$PVC_STATUS" = "Bound" ]; then
-        echo -e "${GREEN}✅ PVC successfully bound${NC}"
-    else
-        # Wait a bit longer and check again
-        sleep 10
-        PVC_STATUS=$(kubectl get pvc -n "$TEST_NS" sanity-pvc -o jsonpath='{.status.phase}')
-        if [ "$PVC_STATUS" = "Bound" ]; then
-            echo -e "${GREEN}✅ PVC successfully bound${NC}"
-        else
-            echo -e "${RED}❌ PVC failed to bind${NC}"
-            echo -e "${BLUE}PVC Status:${NC}"
-            kubectl get pvc -n "$TEST_NS" sanity-pvc
-            kubectl describe pvc -n "$TEST_NS" sanity-pvc
-            exit 1
+            echo -e "${BLUE}Testing without CA certificate (expecting SSL verification failure)${NC}"
+            if ! log_command "kubectl exec -n $TEST_NS curl-test -- curl -v https://$DNS_NAME/sanity-test" "Internal HTTPS test without CA cert"; then
+                echo -e "${YELLOW}⚠️ SSL verification failed as expected (no valid CA cert)${NC}"
+            else
+                echo -e "${RED}❌ Unexpected success: SSL verification should have failed${NC}"
+            fi
         fi
     fi
 
-    # Log PVC details
-    echo -e "${BLUE}PVC Details:${NC}"
-    kubectl get pvc -n "$TEST_NS" sanity-pvc >> "$LOG_FILE"
-
-    # Wait for storage test pod to be ready
-    echo -e "${BLUE}Waiting for storage test pod to be ready...${NC}"
-    if ! log_command "kubectl wait --for=condition=ready pod/storage-test -n $TEST_NS --timeout=60s" "Wait for storage test pod"; then
-        echo -e "${RED}❌ Storage test pod failed to become ready${NC}"
-        # Show pod status for debugging
-        kubectl get pod -n $TEST_NS storage-test
-        kubectl describe pod -n $TEST_NS storage-test
-        exit 1
-    fi
-
-    # Write test file and verify permissions
-    echo -e "${BLUE}Testing file creation with user 1001:1001...${NC}"
-    if ! log_command "kubectl exec -n $TEST_NS storage-test -- /bin/bash -c 'echo \"Test content\" > /data/test.txt'" "Create test file"; then
-        echo -e "${RED}❌ Failed to create test file${NC}"
-        exit 1
-    fi
-
-    # Verify file permissions and ownership
-    echo -e "${BLUE}Verifying file permissions and ownership...${NC}"
-    if ! log_command "kubectl exec -n $TEST_NS storage-test -- ls -l /data/test.txt" "Check file permissions"; then
-        echo -e "${RED}❌ Failed to check file permissions${NC}"
-        exit 1
-    fi
-
-    # Verify file ownership
-    FILE_OWNER=$(kubectl exec -n $TEST_NS storage-test -- ls -ln /data/test.txt | awk '{print $3":"$4}')
-    if [ "$FILE_OWNER" = "1001:1001" ]; then
-        echo -e "${GREEN}✅ File ownership verified: $FILE_OWNER${NC}"
-    else
-        echo -e "${RED}❌ Incorrect file ownership: $FILE_OWNER (expected 1001:1001)${NC}"
-    fi
-
-    # Read file content
-    echo -e "${BLUE}Verifying file content...${NC}"
-    if ! log_command "kubectl exec -n $TEST_NS storage-test -- cat /data/test.txt" "Read test file"; then
-        echo -e "${RED}❌ Failed to read test file${NC}"
-        exit 1
-    fi
-
-    # Add storage test results to log
-    echo -e "\n==== Storage Test Summary ====" >> "$LOG_FILE"
-    echo "StorageClass: $SC_TO_USE" >> "$LOG_FILE"
-    echo "PVC Status:" >> "$LOG_FILE"
-    kubectl get pvc sanity-pvc -n $TEST_NS -o wide >> "$LOG_FILE"
-    echo "File Permissions:" >> "$LOG_FILE"
-    kubectl exec -n $TEST_NS storage-test -- ls -l /data/test.txt >> "$LOG_FILE"
-
-    echo -e "${GREEN}✅ Storage test completed${NC}"
-}
-
-# Add this function near the other function definitions:
-
-check_jfrog_secret() {
-    if [ ! -f "./jfrog.yaml" ]; then
-        echo -e "${YELLOW}⚠️ Warning: jfrog.yaml file not found in current directory${NC}"
-        echo -e "${BLUE}Note: This file is required for accessing private registries${NC}"
-        echo -e "${BLUE}Skipping repository secret configuration...${NC}"
-        return 1
-    fi
-    
-    # Try to apply the secret
-    if ! log_command "kubectl apply -f ./jfrog.yaml -n $TEST_NS" "Apply repository secret"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to apply repository secret${NC}"
-        echo -e "${BLUE}Note: This might affect access to private container images${NC}"
-        return 1
-    fi
-    
-    echo -e "${GREEN}✅ Repository secret applied successfully${NC}"
-    return 0
-}
-
-# Then modify the main execution flow to include this check before creating deployments:
-
-# In the main script, before creating any deployments, add:
-
-if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ]; then
-    # Check for jfrog secret
-    check_jfrog_secret
-    # Continue with other operations regardless of secret status
-fi
-
-# Run other tests as needed
-if [ "$STORAGE_ONLY" = "true" ]; then
-    echo -e "${BLUE}Running storage-only tests...${NC}"
-    run_storage_tests
-else
-    if [ -n "$CERT_FILE" ]; then
-        # Run TLS/ingress tests
-        # ... existing TLS/ingress test code ...
-        # Run storage tests after ingress tests
+    # Run storage tests if requested
+    if [ "$STORAGE_ONLY" = "true" ]; then
+        echo -e "${BLUE}Running storage-only tests...${NC}"
         run_storage_tests
-    fi
-fi
-
-# Run hardware check if requested alongside other tests
-if [ "$HARDWARE_CHECK" = "true" ]; then
-    if ! run_hardware_check; then
-        echo -e "${RED}❌ Hardware validation failed${NC}"
-        cleanup
-        exit 1
     fi
 fi
 
@@ -798,90 +614,4 @@ echo -e "${GREEN}Cleanup completed${NC}"
 echo -e "${BLUE}Log file: ${GREEN}$LOG_FILE${NC}"
 
 # Final status
-echo -e "\n${GREEN}✅ All tests completed successfully!${NC}"
-
-# Add this new function:
-run_diagnostics_check() {
-    echo -e "\n${BLUE}Running pre-installation diagnostics...${NC}"
-    
-    # Determine OS and architecture
-    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-    ARCH=$(uname -m)
-    
-    # Set the appropriate URL based on OS and architecture
-    if [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ]; then
-        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-linux-amd64"
-    elif [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
-        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-darwin-arm64"
-    else
-        echo -e "${RED}❌ Unsupported OS/Architecture combination: $OS/$ARCH${NC}"
-        return 1
-    fi
-    
-    # Download diagnostics tool
-    echo -e "${BLUE}Downloading diagnostics tool...${NC}"
-    if ! curl -L -o preinstall-diagnostics "$DIAG_URL"; then
-        echo -e "${RED}❌ Failed to download diagnostics tool${NC}"
-        return 1
-    fi
-    
-    # Make executable
-    chmod +x preinstall-diagnostics
-    
-    # Run diagnostics
-    echo -e "${BLUE}Running diagnostics...${NC}"
-    ./preinstall-diagnostics > /dev/null 2>&1
-    
-    # Check if results file exists
-    if [ ! -f "runai-diagnostics.txt" ]; then
-        echo -e "${RED}❌ Diagnostics results file not found${NC}"
-        return 1
-    fi
-    
-    # Parse and display results
-    echo -e "\n${BLUE}Diagnostic Results:${NC}"
-    echo -e "----------------------------------------"
-    
-    # Process the results file and format output
-    while IFS= read -r line; do
-        # Remove ANSI color codes and format
-        line=$(echo "$line" | sed 's/\x1B\[[0-9;]*[JKmsu]//g')
-        
-        # Extract test name and result
-        if [[ $line =~ \|[[:space:]]*([^|]+)[[:space:]]*\|[[:space:]]*(PASS|FAIL)[[:space:]]*\|[[:space:]]*([^|]+)[[:space:]]*\| ]]; then
-            TEST_NAME="${BASH_REMATCH[1]}"
-            RESULT="${BASH_REMATCH[2]}"
-            MESSAGE="${BASH_REMATCH[3]}"
-            
-            # Skip empty or header lines
-            if [ -n "$TEST_NAME" ] && [ "$TEST_NAME" != "TEST NAME" ]; then
-                # Format output
-                TEST_NAME=$(echo "$TEST_NAME" | xargs)
-                if [ "$RESULT" = "PASS" ]; then
-                    echo -e "${TEST_NAME}: ${GREEN}✓ PASS${NC}"
-                else
-                    echo -e "${TEST_NAME}: ${RED}✗ FAIL${NC}"
-                    echo -e "  └─ ${YELLOW}$MESSAGE${NC}"
-                fi
-            fi
-        fi
-    done < runai-diagnostics.txt
-    
-    # Cleanup
-    rm -f preinstall-diagnostics
-    
-    echo -e "\n${GREEN}✅ Diagnostics completed${NC}"
-    return 0
-}
-
-# Add to the main execution flow:
-if [ "$DIAG_CHECK" = "true" ]; then
-    if ! run_diagnostics_check; then
-        echo -e "${RED}❌ Diagnostics check failed${NC}"
-        exit 1
-    fi
-    # Exit if only running diagnostics
-    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
-        exit 0
-    fi
-fi 
+echo -e "\n${GREEN}✅ All tests completed successfully!${NC}" 
