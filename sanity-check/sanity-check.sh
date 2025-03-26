@@ -291,6 +291,83 @@ run_diagnostics_check() {
     return 0
 }
 
+# Function to run storage tests
+run_storage_tests() {
+    echo -e "${BLUE}Running storage tests...${NC}"
+
+    # Create PVC
+    echo -e "${BLUE}Creating test PVC...${NC}"
+    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: sanity-pvc
+  namespace: $TEST_NS
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+  $([ -n "$STORAGE_CLASS" ] && echo "storageClassName: $STORAGE_CLASS")
+EOF
+
+    # Wait for PVC to be bound
+    echo -e "${BLUE}Waiting for PVC to be bound...${NC}"
+    for i in {1..30}; do
+        PVC_STATUS=$(kubectl get pvc sanity-pvc -n "$TEST_NS" -o jsonpath='{.status.phase}' 2>/dev/null)
+        if [ "$PVC_STATUS" = "Bound" ]; then
+            echo -e "${GREEN}✅ PVC successfully bound${NC}"
+            break
+        fi
+        if [ $i -eq 30 ]; then
+            echo -e "${RED}❌ PVC failed to bind within timeout${NC}"
+            return 1
+        fi
+        echo -e "${BLUE}⏳ Waiting for PVC to bind... ($i/30)${NC}"
+        sleep 2
+    done
+
+    # Create pod to test storage
+    echo -e "${BLUE}Creating test pod...${NC}"
+    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: storage-test
+  namespace: $TEST_NS
+spec:
+  containers:
+  - name: storage-test
+    image: busybox
+    command: ["sh", "-c", "touch /mnt/test/testfile && chown 1001:1001 /mnt/test/testfile && chmod 640 /mnt/test/testfile && sleep 3600"]
+    volumeMounts:
+    - name: test-volume
+      mountPath: /mnt/test
+  volumes:
+  - name: test-volume
+    persistentVolumeClaim:
+      claimName: sanity-pvc
+EOF
+
+    # Wait for pod to be ready
+    echo -e "${BLUE}Waiting for test pod to be ready...${NC}"
+    if ! kubectl wait --for=condition=ready pod/storage-test -n "$TEST_NS" --timeout=60s >> "$LOG_FILE" 2>&1; then
+        echo -e "${RED}❌ Test pod failed to become ready${NC}"
+        return 1
+    fi
+
+    # Verify file creation and permissions
+    echo -e "${BLUE}Verifying storage permissions...${NC}"
+    if ! kubectl exec storage-test -n "$TEST_NS" -- ls -l /mnt/test/testfile >> "$LOG_FILE" 2>&1; then
+        echo -e "${RED}❌ Failed to verify file creation${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}✅ Storage tests completed successfully${NC}"
+    return 0
+}
+
 # Initialize a flag to track if any valid arguments were provided
 VALID_ARGS=false
 
