@@ -18,6 +18,7 @@ show_usage() {
     echo "  --storage             Run only storage tests"
     echo "  --class STORAGE_CLASS  Specify StorageClass for storage tests (optional)"
     echo "  --hardware            Validate minimum hardware requirements (24 cores, 32GB RAM)"
+    echo "  --diag                Run pre-installation diagnostics"
     echo -e "\nExamples:"
     echo "  $0 --cert runai.crt --key runai.key --dns runai.example.com"
     echo "  $0 --cert runai.crt --key runai.key --dns runai.example.com --cacert ca.pem"
@@ -216,6 +217,80 @@ run_hardware_check() {
     fi
 }
 
+# Function to run diagnostics check
+run_diagnostics_check() {
+    echo -e "\n${BLUE}Running pre-installation diagnostics...${NC}"
+    
+    # Determine OS and architecture
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+    
+    # Set the appropriate URL based on OS and architecture
+    if [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ]; then
+        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-linux-amd64"
+    elif [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-darwin-arm64"
+    else
+        echo -e "${RED}❌ Unsupported OS/Architecture combination: $OS/$ARCH${NC}"
+        return 1
+    fi
+    
+    # Download diagnostics tool
+    echo -e "${BLUE}Downloading diagnostics tool...${NC}"
+    if ! curl -L -o preinstall-diagnostics "$DIAG_URL"; then
+        echo -e "${RED}❌ Failed to download diagnostics tool${NC}"
+        return 1
+    fi
+    
+    # Make executable
+    chmod +x preinstall-diagnostics
+    
+    # Run diagnostics
+    echo -e "${BLUE}Running diagnostics...${NC}"
+    ./preinstall-diagnostics > /dev/null 2>&1
+    
+    # Check if results file exists
+    if [ ! -f "runai-diagnostics.txt" ]; then
+        echo -e "${RED}❌ Diagnostics results file not found${NC}"
+        return 1
+    fi
+    
+    # Parse and display results
+    echo -e "\n${BLUE}Diagnostic Results:${NC}"
+    echo -e "----------------------------------------"
+    
+    # Process the results file and format output
+    while IFS= read -r line; do
+        # Remove ANSI color codes and format
+        line=$(echo "$line" | sed 's/\x1B\[[0-9;]*[JKmsu]//g')
+        
+        # Extract test name and result
+        if [[ $line =~ \|[[:space:]]*([^|]+)[[:space:]]*\|[[:space:]]*(PASS|FAIL)[[:space:]]*\|[[:space:]]*([^|]+)[[:space:]]*\| ]]; then
+            TEST_NAME="${BASH_REMATCH[1]}"
+            RESULT="${BASH_REMATCH[2]}"
+            MESSAGE="${BASH_REMATCH[3]}"
+            
+            # Skip empty or header lines
+            if [ -n "$TEST_NAME" ] && [ "$TEST_NAME" != "TEST NAME" ]; then
+                # Format output
+                TEST_NAME=$(echo "$TEST_NAME" | xargs)
+                if [ "$RESULT" = "PASS" ]; then
+                    echo -e "${TEST_NAME}: ${GREEN}✓ PASS${NC}"
+                else
+                    echo -e "${TEST_NAME}: ${RED}✗ FAIL${NC}"
+                    echo -e "  └─ ${YELLOW}$MESSAGE${NC}"
+                fi
+            fi
+        fi
+    done < runai-diagnostics.txt
+    
+    # Cleanup
+    rm -f preinstall-diagnostics
+    
+    echo -e "\n${GREEN}✅ Diagnostics completed${NC}"
+    return 0
+}
+
 # Initialize a flag to track if any valid arguments were provided
 VALID_ARGS=false
 
@@ -269,6 +344,11 @@ while [[ $# -gt 0 ]]; do
             VALID_ARGS=true
             shift
             ;;
+        --diag)
+            DIAG_CHECK=true
+            VALID_ARGS=true
+            shift
+            ;;
         -h|--help)
             show_usage
             ;;
@@ -290,21 +370,21 @@ if [ "$VALID_ARGS" = false ]; then
 fi
 
 # Validate required parameters
-if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
-    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage or --hardware${NC}"
+if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DIAG_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
+    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage, --hardware, or --diag${NC}"
     show_usage
 fi
 
 echo -e "${BLUE}Starting sanity checks...${NC}"
 
 # Main execution flow
-if [ "$HARDWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ -z "$CERT_FILE" ]; then
-    # Run only hardware check without creating namespace
-    if ! run_hardware_check; then
-        echo -e "${RED}❌ Hardware validation failed${NC}"
+if [ "$DIAG_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+    # Run only diagnostics check without creating namespace
+    if ! run_diagnostics_check; then
+        echo -e "${RED}❌ Diagnostics check failed${NC}"
         exit 1
     fi
-    echo -e "\n${GREEN}✅ Hardware check completed successfully!${NC}"
+    echo -e "\n${GREEN}✅ Diagnostics check completed successfully!${NC}"
     exit 0
 fi
 
@@ -718,4 +798,90 @@ echo -e "${GREEN}Cleanup completed${NC}"
 echo -e "${BLUE}Log file: ${GREEN}$LOG_FILE${NC}"
 
 # Final status
-echo -e "\n${GREEN}✅ All tests completed successfully!${NC}" 
+echo -e "\n${GREEN}✅ All tests completed successfully!${NC}"
+
+# Add this new function:
+run_diagnostics_check() {
+    echo -e "\n${BLUE}Running pre-installation diagnostics...${NC}"
+    
+    # Determine OS and architecture
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+    
+    # Set the appropriate URL based on OS and architecture
+    if [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ]; then
+        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-linux-amd64"
+    elif [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-darwin-arm64"
+    else
+        echo -e "${RED}❌ Unsupported OS/Architecture combination: $OS/$ARCH${NC}"
+        return 1
+    fi
+    
+    # Download diagnostics tool
+    echo -e "${BLUE}Downloading diagnostics tool...${NC}"
+    if ! curl -L -o preinstall-diagnostics "$DIAG_URL"; then
+        echo -e "${RED}❌ Failed to download diagnostics tool${NC}"
+        return 1
+    fi
+    
+    # Make executable
+    chmod +x preinstall-diagnostics
+    
+    # Run diagnostics
+    echo -e "${BLUE}Running diagnostics...${NC}"
+    ./preinstall-diagnostics > /dev/null 2>&1
+    
+    # Check if results file exists
+    if [ ! -f "runai-diagnostics.txt" ]; then
+        echo -e "${RED}❌ Diagnostics results file not found${NC}"
+        return 1
+    fi
+    
+    # Parse and display results
+    echo -e "\n${BLUE}Diagnostic Results:${NC}"
+    echo -e "----------------------------------------"
+    
+    # Process the results file and format output
+    while IFS= read -r line; do
+        # Remove ANSI color codes and format
+        line=$(echo "$line" | sed 's/\x1B\[[0-9;]*[JKmsu]//g')
+        
+        # Extract test name and result
+        if [[ $line =~ \|[[:space:]]*([^|]+)[[:space:]]*\|[[:space:]]*(PASS|FAIL)[[:space:]]*\|[[:space:]]*([^|]+)[[:space:]]*\| ]]; then
+            TEST_NAME="${BASH_REMATCH[1]}"
+            RESULT="${BASH_REMATCH[2]}"
+            MESSAGE="${BASH_REMATCH[3]}"
+            
+            # Skip empty or header lines
+            if [ -n "$TEST_NAME" ] && [ "$TEST_NAME" != "TEST NAME" ]; then
+                # Format output
+                TEST_NAME=$(echo "$TEST_NAME" | xargs)
+                if [ "$RESULT" = "PASS" ]; then
+                    echo -e "${TEST_NAME}: ${GREEN}✓ PASS${NC}"
+                else
+                    echo -e "${TEST_NAME}: ${RED}✗ FAIL${NC}"
+                    echo -e "  └─ ${YELLOW}$MESSAGE${NC}"
+                fi
+            fi
+        fi
+    done < runai-diagnostics.txt
+    
+    # Cleanup
+    rm -f preinstall-diagnostics
+    
+    echo -e "\n${GREEN}✅ Diagnostics completed${NC}"
+    return 0
+}
+
+# Add to the main execution flow:
+if [ "$DIAG_CHECK" = "true" ]; then
+    if ! run_diagnostics_check; then
+        echo -e "${RED}❌ Diagnostics check failed${NC}"
+        exit 1
+    fi
+    # Exit if only running diagnostics
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+        exit 0
+    fi
+fi 
