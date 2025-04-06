@@ -19,12 +19,14 @@ show_usage() {
     echo "  --class STORAGE_CLASS  Specify StorageClass for storage tests (optional)"
     echo "  --hardware            Validate minimum hardware requirements (24 cores, 32GB RAM)"
     echo "  --diag                Run pre-installation diagnostics"
+    echo "  --diag-dns FQDN_NAME  FQDN for diagnostics domain and cluster-domain (only with --diag)"
     echo -e "\nExamples:"
     echo "  $0 --cert runai.crt --key runai.key --dns runai.example.com"
     echo "  $0 --cert runai.crt --key runai.key --dns runai.example.com --cacert ca.pem"
     echo "  $0 --storage                    # Test storage with default StorageClass"
     echo "  $0 --storage --class local-path # Test storage with specific StorageClass"
     echo "  $0 --hardware                   # Check hardware requirements only"
+    echo "  $0 --diag --diag-dns runai.example.local # Run diagnostics with specific domain"
     exit 1
 }
 
@@ -57,6 +59,13 @@ cleanup() {
             echo -e "${YELLOW}⚠️ Forcing namespace deletion...${NC}"
             kubectl delete namespace "$TEST_NS" --force --grace-period=0 &>/dev/null || true
         fi
+    fi
+    
+    # Do not delete the diagnostics tool during cleanup
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+    DIAG_TOOL="$SCRIPT_DIR/preinstall-diagnostics"
+    if [ -f "$DIAG_TOOL" ]; then
+        echo -e "${GREEN}✅ Preserved diagnostics tool at: $DIAG_TOOL${NC}"
     fi
     
     echo -e "${BLUE}Cleanup completed${NC}"
@@ -94,8 +103,9 @@ log_command() {
 run_hardware_check() {
     echo -e "\n${BLUE}Running hardware requirements check...${NC}"
     
-    # Get all worker nodes (excluding nodes with master/control-plane labels)
-    WORKER_NODES=$(kubectl get nodes --no-headers | grep -v -E "master|control-plane" | awk '{print $1}')
+    # Get all nodes and filter based on a specific label or taint that indicates worker capability
+    # For example, assume nodes with the label 'node-role.kubernetes.io/worker' are worker nodes
+    WORKER_NODES=$(kubectl get nodes --no-headers -l 'node-role.kubernetes.io/worker' | awk '{print $1}')
     
     if [ -z "$WORKER_NODES" ]; then
         echo -e "${RED}❌ No worker nodes found in the cluster${NC}"
@@ -219,7 +229,17 @@ run_hardware_check() {
 
 # Function to run diagnostics check
 run_diagnostics_check() {
+    local diag_dns="$1"
     echo -e "\n${BLUE}Running pre-installation diagnostics...${NC}"
+    
+    # Get the directory where the script is located
+    SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+    
+    # Create directory if it doesn't exist
+    mkdir -p "$SCRIPT_DIR" || {
+        echo -e "${RED}❌ Failed to create script directory${NC}"
+        return 1
+    }
     
     # Determine OS and architecture
     OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -235,22 +255,35 @@ run_diagnostics_check() {
         return 1
     fi
     
+    # Set the full path for the diagnostics tool
+    DIAG_TOOL="$SCRIPT_DIR/preinstall-diagnostics"
+    
     # Download diagnostics tool
-    echo -e "${BLUE}Downloading diagnostics tool...${NC}"
-    if ! curl -L -o preinstall-diagnostics "$DIAG_URL"; then
+    echo -e "${BLUE}Downloading diagnostics tool to $DIAG_TOOL...${NC}"
+    if ! curl -L -o "$DIAG_TOOL" "$DIAG_URL"; then
         echo -e "${RED}❌ Failed to download diagnostics tool${NC}"
         return 1
     fi
     
     # Make executable
-    chmod +x preinstall-diagnostics
+    chmod +x "$DIAG_TOOL"
     
-    # Run diagnostics
+    # Run diagnostics from the script directory
     echo -e "${BLUE}Running diagnostics...${NC}"
-    ./preinstall-diagnostics > /dev/null 2>&1
+    cd "$SCRIPT_DIR"
+    
+    # Build the command based on whether DNS is provided
+    local diag_cmd="$DIAG_TOOL"
+    if [ -n "$diag_dns" ]; then
+        echo -e "${BLUE}Using domain: $diag_dns${NC}"
+        diag_cmd="$diag_cmd -domain $diag_dns -cluster-domain $diag_dns"
+    fi
+    
+    # Execute the diagnostics command
+    $diag_cmd > /dev/null 2>&1
     
     # Check if results file exists
-    if [ ! -f "runai-diagnostics.txt" ]; then
+    if [ ! -f "$SCRIPT_DIR/runai-diagnostics.txt" ]; then
         echo -e "${RED}❌ Diagnostics results file not found${NC}"
         return 1
     fi
@@ -282,10 +315,7 @@ run_diagnostics_check() {
                 fi
             fi
         fi
-    done < runai-diagnostics.txt
-    
-    # Cleanup
-    rm -f preinstall-diagnostics
+    done < "$SCRIPT_DIR/runai-diagnostics.txt"
     
     echo -e "\n${GREEN}✅ Diagnostics completed${NC}"
     return 0
@@ -368,6 +398,10 @@ EOF
     return 0
 }
 
+# Initialize variables
+DIAG_DNS=""
+DIAG_MODE=false
+
 # Initialize a flag to track if any valid arguments were provided
 VALID_ARGS=false
 
@@ -422,9 +456,18 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --diag)
-            DIAG_CHECK=true
+            DIAG_MODE=true
             VALID_ARGS=true
             shift
+            ;;
+        --diag-dns)
+            DIAG_DNS="$2"
+            if [ "$DIAG_MODE" != "true" ]; then
+                echo -e "${RED}❌ --diag-dns can only be used with --diag${NC}"
+                exit 1
+            fi
+            VALID_ARGS=true
+            shift 2
             ;;
         -h|--help)
             show_usage
@@ -447,7 +490,7 @@ if [ "$VALID_ARGS" = false ]; then
 fi
 
 # Validate required parameters
-if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DIAG_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
+if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DIAG_MODE" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
     echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage, --hardware, or --diag${NC}"
     show_usage
 fi
@@ -455,8 +498,8 @@ fi
 echo -e "${BLUE}Starting sanity checks...${NC}"
 
 # Run diagnostics if requested
-if [ "$DIAG_CHECK" = "true" ]; then
-    if ! run_diagnostics_check; then
+if [ "$DIAG_MODE" = "true" ]; then
+    if ! run_diagnostics_check "$DIAG_DNS"; then
         echo -e "${RED}❌ Diagnostics check failed${NC}"
         exit 1
     fi
@@ -474,7 +517,7 @@ if [ "$HARDWARE_CHECK" = "true" ]; then
         exit 1
     fi
     # Only exit if this is the only check requested
-    if [ "$STORAGE_ONLY" != "true" ] && [ "$DIAG_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$DIAG_MODE" != "true" ] && [ -z "$CERT_FILE" ]; then
         echo -e "\n${GREEN}✅ Hardware check completed successfully!${NC}"
         exit 0
     fi
@@ -692,3 +735,4 @@ echo -e "${BLUE}Log file: ${GREEN}$LOG_FILE${NC}"
 
 # Final status
 echo -e "\n${GREEN}✅ All tests completed successfully!${NC}" 
+
