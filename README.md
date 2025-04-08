@@ -26,6 +26,7 @@ The Run.ai One-Click Installer is a powerful bash script that automates the depl
 The following fields are always required:
 - `--dns`: DNS name for Run.ai access
 - `--runai-version`: Run.ai version to install
+- If using BCM - please run the script on the BCM headnode 
 
 ### Option Dependencies
 - `--internal-dns` requires `--ip`
