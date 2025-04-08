@@ -13,6 +13,151 @@ mkdir -p "$LOGS_DIR"
 LOG_FILE="$LOGS_DIR/sanity_check_$(date +%Y%m%d_%H%M%S).log"
 echo "Sanity check started at $(date)" > "$LOG_FILE"
 
+# Function to log commands and their output
+log_command() {
+    local cmd="$1"
+    local description="$2"
+    
+    echo -e "\n\n==== $description ====" >> "$LOG_FILE"
+    echo "Command: $cmd" >> "$LOG_FILE"
+    echo "Executing at: $(date)" >> "$LOG_FILE"
+    echo "Output:" >> "$LOG_FILE"
+    
+    # Execute command and capture both stdout and stderr
+    if eval "$cmd" >> "$LOG_FILE" 2>&1; then
+        echo "Status: SUCCESS" >> "$LOG_FILE"
+        return 0
+    else
+        local exit_code=$?
+        echo "Status: FAILED (exit code: $exit_code)" >> "$LOG_FILE"
+        return $exit_code
+    fi
+}
+
+# Function to download preinstall diagnostics tool
+download_preinstall_diagnostics() {
+    echo -e "${BLUE}Downloading preinstall diagnostics tool...${NC}"
+    
+    # Determine OS type and architecture
+    OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+    
+    # Convert architecture to expected format
+    case "$ARCH" in
+        x86_64)
+            ARCH="amd64"
+            ;;
+        aarch64)
+            ARCH="arm64"
+            ;;
+    esac
+    
+    # Get latest release version
+    LATEST_VERSION=$(curl -s https://api.github.com/repos/run-ai/preinstall-diagnostics/releases/latest | grep "tag_name" | cut -d '"' -f 4)
+    if [ -z "$LATEST_VERSION" ]; then
+        echo -e "${RED}❌ Failed to get latest version of preinstall diagnostics${NC}"
+        return 1
+    fi
+    
+    # Construct download URL
+    DOWNLOAD_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/${LATEST_VERSION}/runai-preinstall-${OS_TYPE}-${ARCH}"
+    DIAG_BIN="./runai-preinstall-${OS_TYPE}-${ARCH}"
+    
+    # Download the binary if it doesn't exist
+    if [ ! -f "$DIAG_BIN" ]; then
+        echo -e "${BLUE}Downloading from: $DOWNLOAD_URL${NC}"
+        if ! curl -L -o "$DIAG_BIN" "$DOWNLOAD_URL"; then
+            echo -e "${RED}❌ Failed to download preinstall diagnostics${NC}"
+            return 1
+        fi
+        chmod +x "$DIAG_BIN"
+    else
+        echo -e "${BLUE}Using existing diagnostics binary: $DIAG_BIN${NC}"
+    fi
+    
+    echo -e "${GREEN}✅ Preinstall diagnostics tool ready${NC}"
+    return 0
+}
+
+# Function to run diagnostics check
+run_diagnostics_check() {
+    echo -e "\n${BLUE}Running pre-installation diagnostics...${NC}"
+
+    # Determine OS and architecture
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    ARCH=$(uname -m)
+
+    # Set the appropriate URL based on OS and architecture
+    if [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ]; then
+        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-linux-amd64"
+    elif [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
+        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-darwin-arm64"
+    else
+        echo -e "${RED}❌ Unsupported OS/Architecture combination: $OS/$ARCH${NC}"
+        return 1
+    fi
+
+    # Download diagnostics tool
+    echo -e "${BLUE}Downloading diagnostics tool...${NC}"
+    if ! curl -L -o preinstall-diagnostics "$DIAG_URL"; then
+        echo -e "${RED}❌ Failed to download diagnostics tool${NC}"
+        return 1
+    fi
+
+    # Make executable
+    chmod +x preinstall-diagnostics
+
+    # Run diagnostics
+    echo -e "${BLUE}Running diagnostics...${NC}"
+    if [ -n "$DIAG_DNS" ]; then
+        echo -e "${BLUE}Running DNS diagnostics for domain: $DIAG_DNS${NC}"
+        ./preinstall-diagnostics --domain "$DIAG_DNS" --cluster-domain "$DIAG_DNS" > /dev/null 2>&1
+    else
+        ./preinstall-diagnostics > /dev/null 2>&1
+    fi
+
+    # Check if results file exists
+    if [ ! -f "runai-diagnostics.txt" ]; then
+        echo -e "${RED}❌ Diagnostics results file not found${NC}"
+        return 1
+    fi
+
+    # Parse and display results
+    echo -e "\n${BLUE}Diagnostic Results:${NC}"
+    echo -e "----------------------------------------"
+
+    # Process the results file and format output
+    while IFS= read -r line; do
+        # Remove ANSI color codes and format
+        line=$(echo "$line" | sed 's/\x1B\[[0-9;]*[JKmsu]//g')
+
+        # Extract test name and result
+        if [[ $line =~ \|[[:space:]]*([^|]+)[[:space:]]*\|[[:space:]]*(PASS|FAIL)[[:space:]]*\|[[:space:]]*([^|]+)[[:space:]]*\| ]]; then
+            TEST_NAME="${BASH_REMATCH[1]}"
+            RESULT="${BASH_REMATCH[2]}"
+            MESSAGE="${BASH_REMATCH[3]}"
+
+            # Skip empty or header lines
+            if [ -n "$TEST_NAME" ] && [ "$TEST_NAME" != "TEST NAME" ]; then
+                # Format output
+                TEST_NAME=$(echo "$TEST_NAME" | xargs)
+                if [ "$RESULT" = "PASS" ]; then
+                    echo -e "${TEST_NAME}: ${GREEN}✓ PASS${NC}"
+                else
+                    echo -e "${TEST_NAME}: ${RED}✗ FAIL${NC}"
+                    echo -e "  └─ ${YELLOW}$MESSAGE${NC}"
+                fi
+            fi
+        fi
+    done < runai-diagnostics.txt
+
+    # Cleanup
+    rm -f preinstall-diagnostics
+
+    echo -e "\n${GREEN}✅ Diagnostics completed${NC}"
+    return 0
+}
+
 # Cleanup function
 cleanup() {
     local exit_code=$?
@@ -58,7 +203,9 @@ show_usage() {
     echo "  --cacert CA_FILE       CA certificate file for SSL verification (optional)"
     echo "  --storage              Run only storage tests"
     echo "  --class STORAGE_CLASS  Specify StorageClass for storage tests (optional)"
-    echo "  --hardware             Check hardware requirements (24GB RAM, 24 Cores)"
+    echo "  --hardware             Check hardware requirements (24GB RAM, 12 Cores)"
+    echo "  --diag                 Run preinstall diagnostics"
+    echo "  --diag-dns DNS_NAME    Run DNS diagnostics with specified domain (will be used for both --domain and --cluster-domain)"
     echo ""
     echo "Examples:"
     echo "  $0 --cert runai.crt --key runai.key --dns runai.kirson.local"
@@ -66,28 +213,9 @@ show_usage() {
     echo "  $0 --storage                    # Test storage with default StorageClass"
     echo "  $0 --storage --class local-path # Test storage with specific StorageClass"
     echo "  $0 --hardware                   # Check hardware requirements"
+    echo "  $0 --diag                       # Run preinstall diagnostics"
+    echo "  $0 --diag --diag-dns example.com # Run DNS diagnostics with domain checks"
     exit 1
-}
-
-# Function to log commands and their output
-log_command() {
-    local cmd="$1"
-    local description="$2"
-    
-    echo -e "\n\n==== $description ====" >> "$LOG_FILE"
-    echo "Command: $cmd" >> "$LOG_FILE"
-    echo "Executing at: $(date)" >> "$LOG_FILE"
-    echo "Output:" >> "$LOG_FILE"
-    
-    # Execute command and capture both stdout and stderr
-    if eval "$cmd" >> "$LOG_FILE" 2>&1; then
-        echo "Status: SUCCESS" >> "$LOG_FILE"
-        return 0
-    else
-        local exit_code=$?
-        echo "Status: FAILED (exit code: $exit_code)" >> "$LOG_FILE"
-        return $exit_code
-    fi
 }
 
 # Function to check hardware requirements
@@ -173,6 +301,8 @@ check_hardware_requirements() {
 
 # Initialize variables
 HARDWARE_CHECK=false
+DIAG=false
+DIAG_DNS=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -224,6 +354,16 @@ while [[ $# -gt 0 ]]; do
             VALID_ARGS=true
             shift
             ;;
+        --diag)
+            DIAG=true
+            VALID_ARGS=true
+            shift
+            ;;
+        --diag-dns)
+            DIAG_DNS="$2"
+            VALID_ARGS=true
+            shift 2
+            ;;
         -h|--help)
             show_usage
             ;;
@@ -241,14 +381,39 @@ if [ "$VALID_ARGS" = false ]; then
     echo -e "  - Certificate, key, and DNS parameters for a full test"
     echo -e "  - The --storage flag for storage-only tests"
     echo -e "  - The --hardware flag for hardware check"
+    echo -e "  - The --diag flag for preinstall diagnostics"
     echo -e "\n"
     show_usage
     exit 1
 fi
 
+# Run diagnostics first if requested, and exit if it's the only operation
+if [ "$DIAG" = true ]; then
+    if ! run_diagnostics_check; then
+        echo -e "${RED}❌ Diagnostics check failed${NC}"
+        exit 1
+    fi
+    # Only exit if this is the only check requested
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+        echo -e "\n${GREEN}✅ Diagnostics check completed successfully!${NC}"
+        exit 0
+    fi
+fi
+
+# Skip remaining validation if only running diagnostics
+if [ "$DIAG" = true ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+    exit 0
+fi
+
 # Validate required parameters
 if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
     echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage or --hardware${NC}"
+    show_usage
+fi
+
+# Add validation after argument parsing
+if [ -n "$DIAG_DNS" ] && [ "$DIAG" != true ]; then
+    echo -e "${RED}Error: --diag-dns requires --diag flag${NC}"
     show_usage
 fi
 
