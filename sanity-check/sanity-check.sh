@@ -102,8 +102,9 @@ check_hardware_requirements() {
         return 1
     fi
 
-    REQUIREMENTS_MET=true
     NODE_COUNT=0
+    TOTAL_CPU=0
+    TOTAL_RAM_GB=0
 
     while read -r node; do
         ((NODE_COUNT++))
@@ -113,16 +114,15 @@ check_hardware_requirements() {
         CPU_CORES=$(kubectl get node "$node" -o jsonpath='{.status.capacity.cpu}')
         if [ -z "$CPU_CORES" ]; then
             echo -e "${RED}Failed to get CPU capacity for node $node${NC}"
-            REQUIREMENTS_MET=false
-            continue
+            return 1
         fi
+        TOTAL_CPU=$((TOTAL_CPU + CPU_CORES))
 
         # Get RAM and convert to GB
         RAM_RAW=$(kubectl get node "$node" -o jsonpath='{.status.capacity.memory}')
         if [ -z "$RAM_RAW" ]; then
             echo -e "${RED}Failed to get memory capacity for node $node${NC}"
-            REQUIREMENTS_MET=false
-            continue
+            return 1
         fi
 
         # Convert memory to GB
@@ -135,32 +135,38 @@ check_hardware_requirements() {
         else
             RAM_GB=$((RAM_RAW / 1024 / 1024))
         fi
+        TOTAL_RAM_GB=$((TOTAL_RAM_GB + RAM_GB))
 
-        # Check requirements for this node
-        echo -e "└─ CPU Cores: ${BLUE}$CPU_CORES${NC} (minimum: 24)"
-        echo -e "└─ RAM: ${BLUE}${RAM_GB}GB${NC} (minimum: 24GB)"
-
-        if [ "$CPU_CORES" -lt 24 ]; then
-            echo -e "${RED}❌ Insufficient CPU cores${NC}"
-            REQUIREMENTS_MET=false
-        fi
-
-        if [ "$RAM_GB" -lt 24 ]; then
-            echo -e "${RED}❌ Insufficient RAM${NC}"
-            REQUIREMENTS_MET=false
-        fi
-
+        # Show individual node resources
+        echo -e "└─ CPU Cores: ${BLUE}$CPU_CORES${NC}"
+        echo -e "└─ RAM: ${BLUE}${RAM_GB}GB${NC}"
         echo ""
     done <<< "$NODES"
 
-    echo -e "${BLUE}Summary:${NC}"
+    echo -e "${BLUE}Cluster Resources Summary:${NC}"
     echo -e "----------------------------------------"
-    echo -e "Nodes checked: $NODE_COUNT"
+    echo -e "Total Nodes: $NODE_COUNT"
+    echo -e "Total CPU Cores: ${BLUE}$TOTAL_CPU${NC} (minimum: 24)"
+    echo -e "Total RAM: ${BLUE}${TOTAL_RAM_GB}GB${NC} (minimum: 24GB)"
+    echo -e "----------------------------------------"
+
+    # Check total requirements
+    REQUIREMENTS_MET=true
+    if [ "$TOTAL_CPU" -lt 24 ]; then
+        echo -e "${RED}❌ Insufficient total CPU cores ($TOTAL_CPU < 24)${NC}"
+        REQUIREMENTS_MET=false
+    fi
+
+    if [ "$TOTAL_RAM_GB" -lt 24 ]; then
+        echo -e "${RED}❌ Insufficient total RAM (${TOTAL_RAM_GB}GB < 24GB)${NC}"
+        REQUIREMENTS_MET=false
+    fi
+
     if [ "$REQUIREMENTS_MET" = true ]; then
-        echo -e "${GREEN}✅ All nodes meet minimum requirements${NC}"
+        echo -e "${GREEN}✅ Cluster meets minimum requirements${NC}"
         return 0
     else
-        echo -e "${RED}❌ Some nodes do not meet minimum requirements${NC}"
+        echo -e "${RED}❌ Cluster does not meet minimum requirements${NC}"
         return 1
     fi
 }
