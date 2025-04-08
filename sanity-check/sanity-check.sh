@@ -151,8 +151,8 @@ run_diagnostics_check() {
         fi
     done < runai-diagnostics.txt
 
-    # Cleanup
-    rm -f preinstall-diagnostics
+    # Cleanup removed to keep the binary file
+    # rm -f preinstall-diagnostics
 
     echo -e "\n${GREEN}✅ Diagnostics completed${NC}"
     return 0
