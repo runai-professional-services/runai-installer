@@ -22,35 +22,56 @@ The Run.ai One-Click Installer is a powerful bash script that automates the depl
 
 ## 🚀 Quick Start
 
+### Required Fields
+The following fields are always required:
+- `--dns`: DNS name for Run.ai access
+- `--runai-version`: Run.ai version to install
 
-### Installation with internal DNS configuration
+### Option Dependencies
+- `--internal-dns` requires `--ip`
+- `--cert` requires `--key` (and vice versa)
+- `--patch-nginx` requires `--ip`
 
+### Basic Installation Example
 ```sh
-one-click-installer.sh --dns runai.example.com --internal-dns --ip 172.21.140.20 --runai-version 2.20.22
+one-click-installer.sh --dns runai.example.com --runai-version 2.20.22
 ```
 
-### Installation with custom certificates
+### Installation with Internal DNS
+```sh
+# Note: --internal-dns requires --ip
+one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
+  --internal-dns --ip 172.21.140.20
+```
 
+### Installation with Custom Certificates
+```sh
+# Note: --cert requires --key
+one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
+  --cert /path/to/cert.pem --key /path/to/key.pem
+```
+
+### Full Installation with All Components
 ```sh
 one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
- --cert /path/to/cert.pem --key /path/to/key.pem
+  --nginx --prometheus --gpu-operator --knative \
+  --internal-dns --ip 172.21.140.20
 ```
 
-### Full installation with all optional components
-
+### Installation Using sslip.io with BCM Integration
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
- --nginx --prometheus --gpu-operator --knative --internal-dns
+# Format: <name>.<ip-address>.sslip.io
+# Example using IP 192.168.0.200:
+one-click-installer.sh --dns 192.168.0.200.sslip.io --runai-version 2.20.22 \
+  --nginx --prometheus --gpu-operator --knative --BCM \
+  --ip 192.168.0.200
 ```
 
-### Full installation with all optional components - use case without any DNS - using sslip.io & BCM 
-
+### Patch Existing Nginx Installation
 ```sh
-one-click-installer.sh --dns www.192.168.0.1.sslip.io  --runai-version 2.20.22 --nginx --prometheus \
- --gpu-operator --knative -BCM
+# Note: --patch-nginx requires --ip
+one-click-installer.sh --dns runai.example.com --ip 192.168.0.200 --patch-nginx
 ```
-
-
 
 ## 📋 Options
 
