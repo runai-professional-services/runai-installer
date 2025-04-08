@@ -58,12 +58,14 @@ show_usage() {
     echo "  --cacert CA_FILE       CA certificate file for SSL verification (optional)"
     echo "  --storage              Run only storage tests"
     echo "  --class STORAGE_CLASS  Specify StorageClass for storage tests (optional)"
+    echo "  --hardware             Check hardware requirements (24GB RAM, 24 Cores)"
     echo ""
     echo "Examples:"
     echo "  $0 --cert runai.crt --key runai.key --dns runai.kirson.local"
     echo "  $0 --cert runai.crt --key runai.key --dns runai.kirson.local --cacert ca.pem"
     echo "  $0 --storage                    # Test storage with default StorageClass"
     echo "  $0 --storage --class local-path # Test storage with specific StorageClass"
+    echo "  $0 --hardware                   # Check hardware requirements"
     exit 1
 }
 
@@ -88,8 +90,83 @@ log_command() {
     fi
 }
 
-# Initialize a flag to track if any valid arguments were provided
-VALID_ARGS=false
+# Function to check hardware requirements
+check_hardware_requirements() {
+    echo -e "${BLUE}Checking hardware requirements...${NC}"
+    echo -e "${BLUE}Minimum Required: 24GB RAM, 24 CPU Cores${NC}\n"
+
+    # Get all nodes
+    NODES=$(kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name)
+    if [ -z "$NODES" ]; then
+        echo -e "${RED}❌ No nodes found in the cluster${NC}"
+        return 1
+    fi
+
+    REQUIREMENTS_MET=true
+    NODE_COUNT=0
+
+    while read -r node; do
+        ((NODE_COUNT++))
+        echo -e "${BLUE}Checking node: ${GREEN}$node${NC}"
+
+        # Get CPU cores
+        CPU_CORES=$(kubectl get node "$node" -o jsonpath='{.status.capacity.cpu}')
+        if [ -z "$CPU_CORES" ]; then
+            echo -e "${RED}Failed to get CPU capacity for node $node${NC}"
+            REQUIREMENTS_MET=false
+            continue
+        fi
+
+        # Get RAM and convert to GB
+        RAM_RAW=$(kubectl get node "$node" -o jsonpath='{.status.capacity.memory}')
+        if [ -z "$RAM_RAW" ]; then
+            echo -e "${RED}Failed to get memory capacity for node $node${NC}"
+            REQUIREMENTS_MET=false
+            continue
+        fi
+
+        # Convert memory to GB
+        if [[ $RAM_RAW == *Ki ]]; then
+            RAM_GB=$((${RAM_RAW%Ki} / 1024 / 1024))
+        elif [[ $RAM_RAW == *Mi ]]; then
+            RAM_GB=$((${RAM_RAW%Mi} / 1024))
+        elif [[ $RAM_RAW == *Gi ]]; then
+            RAM_GB=${RAM_RAW%Gi}
+        else
+            RAM_GB=$((RAM_RAW / 1024 / 1024))
+        fi
+
+        # Check requirements for this node
+        echo -e "└─ CPU Cores: ${BLUE}$CPU_CORES${NC} (minimum: 24)"
+        echo -e "└─ RAM: ${BLUE}${RAM_GB}GB${NC} (minimum: 24GB)"
+
+        if [ "$CPU_CORES" -lt 24 ]; then
+            echo -e "${RED}❌ Insufficient CPU cores${NC}"
+            REQUIREMENTS_MET=false
+        fi
+
+        if [ "$RAM_GB" -lt 24 ]; then
+            echo -e "${RED}❌ Insufficient RAM${NC}"
+            REQUIREMENTS_MET=false
+        fi
+
+        echo ""
+    done <<< "$NODES"
+
+    echo -e "${BLUE}Summary:${NC}"
+    echo -e "----------------------------------------"
+    echo -e "Nodes checked: $NODE_COUNT"
+    if [ "$REQUIREMENTS_MET" = true ]; then
+        echo -e "${GREEN}✅ All nodes meet minimum requirements${NC}"
+        return 0
+    else
+        echo -e "${RED}❌ Some nodes do not meet minimum requirements${NC}"
+        return 1
+    fi
+}
+
+# Initialize variables
+HARDWARE_CHECK=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -136,6 +213,11 @@ while [[ $# -gt 0 ]]; do
             VALID_ARGS=true
             shift 2
             ;;
+        --hardware)
+            HARDWARE_CHECK=true
+            VALID_ARGS=true
+            shift
+            ;;
         -h|--help)
             show_usage
             ;;
@@ -151,18 +233,33 @@ if [ "$VALID_ARGS" = false ]; then
     echo -e "${RED}Error: No arguments provided${NC}"
     echo -e "${YELLOW}You must provide either:${NC}"
     echo -e "  - Certificate, key, and DNS parameters for a full test"
-    echo -e "  - The --storage flag for storage-only tests\n"
+    echo -e "  - The --storage flag for storage-only tests"
+    echo -e "  - The --hardware flag for hardware check"
+    echo -e "\n"
     show_usage
     exit 1
 fi
 
 # Validate required parameters
-if [ "$STORAGE_ONLY" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
-    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage${NC}"
+if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
+    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage or --hardware${NC}"
     show_usage
 fi
 
 echo -e "${BLUE}Starting sanity checks...${NC}"
+
+# Run hardware check if requested
+if [ "$HARDWARE_CHECK" = "true" ]; then
+    if ! check_hardware_requirements; then
+        echo -e "${RED}❌ Hardware validation failed${NC}"
+        exit 1
+    fi
+    # Only exit if this is the only check requested
+    if [ "$STORAGE_ONLY" != "true" ] && [ -z "$CERT_FILE" ]; then
+        echo -e "\n${GREEN}✅ Hardware check completed successfully!${NC}"
+        exit 0
+    fi
+fi
 
 # Create test namespace
 TEST_NS="sanity-test-$(date +%s)"
