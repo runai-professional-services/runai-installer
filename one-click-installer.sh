@@ -382,13 +382,49 @@ data:
 
     # Verify DNS resolution
     echo -e "${BLUE}Verifying DNS resolution...${NC}"
-    if ! log_command "kubectl run -it --rm --restart=Never dns-test --image=busybox -- nslookup $DNS_NAME" "Test DNS resolution"; then
-        echo -e "${YELLOW}⚠️ Warning: DNS resolution test failed. You may need to manually verify DNS resolution.${NC}"
+    
+    # Create a temporary file to store nslookup output
+    NSLOOKUP_OUTPUT="${TEMP_DIR}/nslookup_output.txt"
+    
+    echo "Running DNS test for $DNS_NAME..." >> "$LOG_FILE"
+    
+    # Run the test pod with nslookup and capture output
+    kubectl run dns-test --rm -i --restart=Never --image=busybox -- nslookup $DNS_NAME > "$NSLOOKUP_OUTPUT" 2>&1
+    
+    # Log the complete nslookup output
+    echo "DNS test output:" >> "$LOG_FILE"
+    cat "$NSLOOKUP_OUTPUT" >> "$LOG_FILE"
+    
+    # Check if nslookup output contains any error messages
+    if grep -q "can't resolve" "$NSLOOKUP_OUTPUT"; then
+        echo -e "${RED}❌ DNS resolution failed - domain cannot be resolved${NC}"
+        echo "DNS resolution failed - domain cannot be resolved" >> "$LOG_FILE"
+        cat "$NSLOOKUP_OUTPUT"
     else
-        echo -e "${GREEN}✅ DNS resolution for $DNS_NAME is working correctly${NC}"
+        # DNS resolution completed, check if we got an answer
+        if grep -q "Address:" "$NSLOOKUP_OUTPUT"; then
+            echo -e "${GREEN}✅ DNS resolution test successful${NC}"
+            echo "DNS resolution test successful" >> "$LOG_FILE"
+            
+            # Log the resolved IP address
+            RESOLVED_IP=$(grep "Address:" "$NSLOOKUP_OUTPUT" | tail -n1 | awk '{print $2}')
+            echo "Resolved IP: $RESOLVED_IP" >> "$LOG_FILE"
+            
+            if [ -n "$IP_ADDRESS" ] && [ "$RESOLVED_IP" != "$IP_ADDRESS" ]; then
+                echo "Warning: Resolved IP ($RESOLVED_IP) does not match configured IP ($IP_ADDRESS)" >> "$LOG_FILE"
+            fi
+        else
+            echo -e "${YELLOW}⚠️ Warning: Unexpected nslookup output format${NC}"
+            echo "Warning: Unexpected nslookup output format" >> "$LOG_FILE"
+            cat "$NSLOOKUP_OUTPUT" >> "$LOG_FILE"
+        fi
     fi
+    
+    # Cleanup temporary file
+    rm -f "$NSLOOKUP_OUTPUT"
 
     echo -e "${GREEN}✅ CoreDNS updated with $DNS_NAME -> $IP_ADDRESS${NC}"
+    echo "CoreDNS update completed for $DNS_NAME -> $IP_ADDRESS" >> "$LOG_FILE"
     return 0
 }
 
@@ -953,11 +989,25 @@ install_runai() {
     chmod +x install.sh
     
     echo -e "${GREEN}✅ Run.ai installation script created successfully!${NC}"
-    echo -e "${BLUE}Executing installation script...${NC}"
+    
+    # Log the contents of install.sh
+    echo -e "${BLUE}Contents of install.sh:${NC}"
+    echo -e "${YELLOW}$(cat install.sh)${NC}"
+    echo -e "\n${BLUE}Executing installation script...${NC}"
     
     # Execute the installation script
-    if ! log_command "./install.sh" "Execute Run.ai cluster installation script"; then
-        echo -e "${RED}❌ Run.ai installation failed${NC}"
+    echo -e "${BLUE}Installing Run.ai cluster components...${NC}"
+    
+    # Log the full command
+    echo "Executing installation commands:" >> "$LOG_FILE"
+    echo "$(cat install.sh)" >> "$LOG_FILE"
+    
+    # Execute install.sh silently and log all output
+    echo -e "${BLUE}Executing installation script...${NC}"
+    if ./install.sh >> "$LOG_FILE" 2>&1; then
+        echo -e "${GREEN}✅ Run.ai cluster components installed successfully${NC}"
+    else
+        echo -e "${RED}❌ Run.ai installation failed. Please check the logs at $LOG_FILE for details${NC}"
         exit 1
     fi
     
@@ -980,7 +1030,7 @@ install_runai() {
     done
     
     echo -e "${GREEN}✅ Run.ai installation completed successfully!${NC}"
-}
+}  # End of install_runai function
 
 # Simplified status function that only shows pod counts
 show_simple_status() {
@@ -1199,7 +1249,6 @@ fi
 # Setup certificates if not skipped
 if [ "$NO_CERT" = true ]; then
     echo -e "${BLUE}Skipping certificate setup as requested with --no-cert flag...${NC}"
-    # No need to create empty files or set certificate paths
 else
     # Setup certificates
     setup_certificates

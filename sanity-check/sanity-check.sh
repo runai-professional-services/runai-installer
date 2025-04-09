@@ -441,7 +441,7 @@ if ! log_command "kubectl create namespace $TEST_NS" "Create test namespace"; th
 fi
 
 # Only run TLS/ingress tests if not in storage-only mode
-if [ "$STORAGE_ONLY" != "true" ]; then
+if [ "$STORAGE_ONLY" != "true" ] && [ -n "$CERT_FILE" ]; then
     # Create TLS secret
     echo -e "${BLUE}Creating TLS secret...${NC}"
     if ! log_command "kubectl create secret tls sanity-tls -n $TEST_NS --cert=$CERT_FILE --key=$KEY_FILE" "Create TLS secret"; then
@@ -772,18 +772,10 @@ if [ "$STORAGE_ONLY" = "true" ]; then
     echo -e "- Pod Creation: ${GREEN}✓${NC}"
     echo -e "- Storage Binding: ${GREEN}✓${NC}"
 else
-    echo -e "Full Tests:"
+    echo -e "TLS/Ingress Tests:"
     echo -e "- TLS Secret Creation: ${GREEN}✓${NC}"
     echo -e "- Ingress Creation: ${GREEN}✓${NC}"
-    echo -e "- Storage Tests:"
-    if [ -n "$STORAGE_CLASS" ]; then
-        echo -e "  - Using StorageClass: ${GREEN}$STORAGE_CLASS${NC}"
-    else
-        echo -e "  - Using default StorageClass"
-    fi
-    echo -e "  - PVC Creation: ${GREEN}✓${NC}"
-    echo -e "  - Pod Creation: ${GREEN}✓${NC}"
-    echo -e "  - Storage Binding: ${GREEN}✓${NC}"
+    echo -e "- HTTPS Access Tests: ${GREEN}✓${NC}"
 fi
 echo -e "----------------------------------------"
 
