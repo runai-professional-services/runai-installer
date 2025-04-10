@@ -218,10 +218,47 @@ show_usage() {
     exit 1
 }
 
+# Function to check required components
+check_required_components() {
+    echo -e "${YELLOW}Checking required components...${NC}"
+    
+    # Get all helm releases
+    HELM_RELEASES=$(helm list -A 2>/dev/null)
+    
+    # Check for Prometheus
+    if echo "$HELM_RELEASES" | grep -q "prometheus"; then
+        echo -e "${GREEN}✅ Prometheus Installed${NC}"
+    else
+        echo -e "${RED}❌ Prometheus Missing${NC}"
+    fi
+    
+    # Check for NGINX - either Helm release or running pods is sufficient
+    NGINX_HELM=$(echo "$HELM_RELEASES" | grep -q "nginx" && echo "true" || echo "false")
+    NGINX_PODS=$(kubectl get pods -A 2>/dev/null | grep -q "ingress-nginx" && echo "true" || echo "false")
+    
+    if [ "$NGINX_HELM" = "true" ] || [ "$NGINX_PODS" = "true" ]; then
+        echo -e "${GREEN}✅ NGINX Installed${NC}"
+    else
+        echo -e "${RED}❌ NGINX Missing${NC}"
+    fi
+    
+    # Check for GPU Operator
+    if echo "$HELM_RELEASES" | grep -q "gpu-operator"; then
+        echo -e "${GREEN}✅ GPU Operator Installed${NC}"
+    else
+        echo -e "${RED}❌ GPU Operator Missing${NC}"
+    fi
+    
+    echo ""
+}
+
 # Function to check hardware requirements
 check_hardware_requirements() {
     echo -e "${YELLOW}Checking hardware requirements...${NC}"
     echo -e "${YELLOW}Minimum Required: 24GB RAM, 24 CPU Cores${NC}\n"
+
+    # Check required components first
+    check_required_components
 
     # Check Kubernetes version
     echo -e "${YELLOW}Checking Kubernetes version...${NC}"
@@ -291,7 +328,9 @@ check_hardware_requirements() {
 
     # List Storage Classes
     echo -e "${YELLOW}Storage Classes:${NC}"
-    kubectl get storageclass -o name
+    kubectl get storageclass -o name | while read -r sc; do
+        echo -e "└─ $sc"
+    done
     echo ""
 
     # Get all nodes

@@ -2,3 +2,4 @@ logs/
 preinstall-diagnostics
 runai-diagnostics.txt
 runai-preinstall-linux-amd64
+../certificates/

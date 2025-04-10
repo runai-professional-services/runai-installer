@@ -7,6 +7,26 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Initial warning and confirmation
+echo -e "${RED}WARNING: This script will delete all Run.ai resources from your cluster.${NC}"
+echo -e "${RED}This action cannot be undone.${NC}"
+
+# First confirmation
+echo -e "${RED}Are you sure you want to proceed? (Y/N)${NC}"
+read -r response
+if [[ "$response" != "Y" ]]; then
+    echo -e "${YELLOW}Operation cancelled.${NC}"
+    exit 1
+fi
+
+# Second confirmation
+echo -e "${RED}Are you absolutely sure? This will delete ALL Run.ai resources. (Y/N)${NC}"
+read -r response
+if [[ "$response" != "Y" ]]; then
+    echo -e "${YELLOW}Operation cancelled.${NC}"
+    exit 1
+fi
+
 echo -e "${BLUE}Starting Run.ai cleanup...${NC}"
 
 # Function to delete Helm releases
