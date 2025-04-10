@@ -220,8 +220,79 @@ show_usage() {
 
 # Function to check hardware requirements
 check_hardware_requirements() {
-    echo -e "${BLUE}Checking hardware requirements...${NC}"
-    echo -e "${BLUE}Minimum Required: 24GB RAM, 24 CPU Cores${NC}\n"
+    echo -e "${YELLOW}Checking hardware requirements...${NC}"
+    echo -e "${YELLOW}Minimum Required: 24GB RAM, 24 CPU Cores${NC}\n"
+
+    # Check Kubernetes version
+    echo -e "${YELLOW}Checking Kubernetes version...${NC}"
+    if ! command -v kubectl &>/dev/null; then
+        echo -e "${RED}❌ kubectl not found${NC}\n"
+    else
+        K8S_VERSION=$(kubectl get nodes -o wide 2>/dev/null | awk 'NR==2 {print $5}')
+        if [ -n "$K8S_VERSION" ]; then
+            echo -e "${GREEN}✅ Kubernetes version: $K8S_VERSION${NC}"
+            
+            # Extract major.minor version
+            K8S_MAJOR_MINOR=$(echo "$K8S_VERSION" | grep -oP 'v?\K\d+\.\d+')
+            
+            # Check Run.ai version compatibility
+            echo -e "${YELLOW}Checking Run.ai version compatibility...${NC}"
+            SUPPORTED_VERSIONS=""
+            
+            # Check each Run.ai version's compatibility
+            if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(2[7-9]|3[0-2])$ ]]; then
+                # v2.17 supports 1.27-1.29
+                if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(2[7-9])$ ]]; then
+                    SUPPORTED_VERSIONS="2.17"
+                fi
+                
+                # v2.18 supports 1.28-1.30
+                if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(2[8-9]|30)$ ]]; then
+                    [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
+                    SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.18"
+                fi
+                
+                # v2.19 supports 1.28-1.31
+                if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(2[8-9]|3[0-1])$ ]]; then
+                    [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
+                    SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.19"
+                fi
+                
+                # v2.20 supports 1.29-1.32
+                if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(2[9]|3[0-2])$ ]]; then
+                    [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
+                    SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.20"
+                fi
+                
+                # v2.21 supports 1.30-1.32
+                if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(3[0-2])$ ]]; then
+                    [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
+                    SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.21"
+                fi
+            fi
+            
+            if [ -n "$SUPPORTED_VERSIONS" ]; then
+                echo -e "${GREEN}✅ Supported Run.ai versions: $SUPPORTED_VERSIONS${NC}"
+            else
+                echo -e "${RED}❌ No supported Run.ai versions found for Kubernetes $K8S_MAJOR_MINOR${NC}"
+            fi
+            echo ""
+        else
+            echo -e "${RED}❌ Could not determine Kubernetes version${NC}"
+            echo -e "${YELLOW}Checking kubectl connection...${NC}"
+            if kubectl cluster-info &>/dev/null; then
+                echo -e "${GREEN}✅ kubectl is connected to cluster${NC}"
+            else
+                echo -e "${RED}❌ kubectl cannot connect to cluster${NC}"
+            fi
+            echo ""
+        fi
+    fi
+
+    # List Storage Classes
+    echo -e "${YELLOW}Storage Classes:${NC}"
+    kubectl get storageclass -o name
+    echo ""
 
     # Get all nodes
     NODES=$(kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name)
@@ -236,7 +307,7 @@ check_hardware_requirements() {
 
     while read -r node; do
         ((NODE_COUNT++))
-        echo -e "${BLUE}Checking node: ${GREEN}$node${NC}"
+        echo -e "${YELLOW}Checking node: ${GREEN}$node${NC}"
 
         # Get CPU cores
         CPU_CORES=$(kubectl get node "$node" -o jsonpath='{.status.capacity.cpu}')
@@ -266,16 +337,16 @@ check_hardware_requirements() {
         TOTAL_RAM_GB=$((TOTAL_RAM_GB + RAM_GB))
 
         # Show individual node resources
-        echo -e "└─ CPU Cores: ${BLUE}$CPU_CORES${NC}"
-        echo -e "└─ RAM: ${BLUE}${RAM_GB}GB${NC}"
+        echo -e "└─ CPU Cores: ${YELLOW}$CPU_CORES${NC}"
+        echo -e "└─ RAM: ${YELLOW}${RAM_GB}GB${NC}"
         echo ""
     done <<< "$NODES"
 
-    echo -e "${BLUE}Cluster Resources Summary:${NC}"
+    echo -e "${YELLOW}Cluster Resources Summary:${NC}"
     echo -e "----------------------------------------"
     echo -e "Total Nodes: $NODE_COUNT"
-    echo -e "Total CPU Cores: ${BLUE}$TOTAL_CPU${NC} (minimum: 24)"
-    echo -e "Total RAM: ${BLUE}${TOTAL_RAM_GB}GB${NC} (minimum: 24GB)"
+    echo -e "Total CPU Cores: ${YELLOW}$TOTAL_CPU${NC} (minimum: 24)"
+    echo -e "Total RAM: ${YELLOW}${TOTAL_RAM_GB}GB${NC} (minimum: 24GB)"
     echo -e "----------------------------------------"
 
     # Check total requirements
