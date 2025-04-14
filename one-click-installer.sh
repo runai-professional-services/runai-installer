@@ -1286,7 +1286,7 @@ echo
 
 # Add certificate instructions if using self-signed certificates
 if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
-    echo -e "${YELLOW}For self-signed certificates, please copy ${TEMP_DIR}/rootCA.pem to your browser or operating system${NC}"
+    echo -e "${YELLOW}For self-signed certificates, please copy certificates/rootCA.pem to your browser or operating system${NC}"
     echo
 fi
 
