@@ -342,6 +342,8 @@ check_hardware_requirements() {
     NODE_COUNT=0
     TOTAL_CPU=0
     TOTAL_RAM_GB=0
+    GPU_NODES=0
+    TOTAL_GPUS=0
 
     while read -r node; do
         ((NODE_COUNT++))
@@ -374,6 +376,14 @@ check_hardware_requirements() {
         fi
         TOTAL_RAM_GB=$((TOTAL_RAM_GB + RAM_GB))
 
+        # Check for GPU resources
+        GPU_COUNT=$(kubectl get node "$node" -o jsonpath='{.status.capacity.nvidia\.com/gpu}')
+        if [ -n "$GPU_COUNT" ] && [ "$GPU_COUNT" != "0" ]; then
+            ((GPU_NODES++))
+            TOTAL_GPUS=$((TOTAL_GPUS + GPU_COUNT))
+            echo -e "└─ GPU Count: ${YELLOW}$GPU_COUNT${NC}"
+        fi
+
         # Show individual node resources
         echo -e "└─ CPU Cores: ${YELLOW}$CPU_CORES${NC}"
         echo -e "└─ RAM: ${YELLOW}${RAM_GB}GB${NC}"
@@ -385,6 +395,12 @@ check_hardware_requirements() {
     echo -e "Total Nodes: $NODE_COUNT"
     echo -e "Total CPU Cores: ${YELLOW}$TOTAL_CPU${NC} (minimum: 24)"
     echo -e "Total RAM: ${YELLOW}${TOTAL_RAM_GB}GB${NC} (minimum: 24GB)"
+    if [ "$GPU_NODES" -gt 0 ]; then
+        echo -e "GPU Nodes: ${YELLOW}$GPU_NODES${NC}"
+        echo -e "Total GPUs: ${YELLOW}$TOTAL_GPUS${NC}"
+    else
+        echo -e "GPU Nodes: ${RED}None detected${NC}"
+    fi
     echo -e "----------------------------------------"
 
     # Check total requirements
@@ -562,13 +578,85 @@ EOF
         exit 1
     fi
 
+    # Test 1: Create file as user 1001:1001 (already implemented)
+    echo -e "${YELLOW}Test 1: File created by user 1001:1001${NC}"
+    echo -e "${GREEN}✅ Test 1 completed (file created with correct ownership)${NC}"
+
+    # Test 2: Create file as root and change ownership
+    echo -e "${YELLOW}Test 2: Creating root pod to test ownership change...${NC}"
+    
+    # Create root pod
+    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
+apiVersion: v1
+kind: Pod
+metadata:
+  name: root-test
+  namespace: $TEST_NS
+spec:
+  containers:
+  - name: root-test
+    image: ubuntu:latest
+    command: 
+    - sleep
+    - "3600"
+    securityContext:
+      runAsUser: 0
+      runAsGroup: 0
+    volumeMounts:
+    - name: storage-volume
+      mountPath: /data
+  volumes:
+  - name: storage-volume
+    persistentVolumeClaim:
+      claimName: sanity-pvc
+EOF
+
+    # Wait for root pod to be ready
+    echo -e "${YELLOW}Waiting for root pod to be ready...${NC}"
+    if ! log_command "kubectl wait --for=condition=ready pod/root-test -n $TEST_NS --timeout=60s" "Wait for root pod"; then
+        echo -e "${RED}❌ Root pod failed to become ready${NC}"
+        exit 1
+    fi
+
+    # Create file as root
+    echo -e "${YELLOW}Creating file as root...${NC}"
+    if ! log_command "kubectl exec -n $TEST_NS root-test -- touch /data/root_test.txt" "Create file as root"; then
+        echo -e "${RED}❌ Failed to create file as root${NC}"
+        exit 1
+    fi
+
+    # Verify initial ownership (should be 0:0)
+    ROOT_FILE_OWNER=$(kubectl exec -n $TEST_NS root-test -- ls -ln /data/root_test.txt | awk '{print $3":"$4}')
+    if [ "$ROOT_FILE_OWNER" = "0:0" ]; then
+        echo -e "${GREEN}✅ Initial file ownership verified: $ROOT_FILE_OWNER${NC}"
+    else
+        echo -e "${RED}❌ Incorrect initial file ownership: $ROOT_FILE_OWNER (expected 0:0)${NC}"
+    fi
+
+    # Change ownership to 1001:1001
+    echo -e "${YELLOW}Changing file ownership to 1001:1001...${NC}"
+    if ! log_command "kubectl exec -n $TEST_NS root-test -- chown 1001:1001 /data/root_test.txt" "Change file ownership"; then
+        echo -e "${RED}❌ Failed to change file ownership${NC}"
+        exit 1
+    fi
+
+    # Verify new ownership
+    NEW_OWNER=$(kubectl exec -n $TEST_NS root-test -- ls -ln /data/root_test.txt | awk '{print $3":"$4}')
+    if [ "$NEW_OWNER" = "1001:1001" ]; then
+        echo -e "${GREEN}✅ File ownership successfully changed to: $NEW_OWNER${NC}"
+    else
+        echo -e "${RED}❌ Failed to change file ownership. Current ownership: $NEW_OWNER (expected 1001:1001)${NC}"
+    fi
+
     # Add storage test results to log
     echo -e "\n==== Storage Test Summary ====" >> "$LOG_FILE"
     echo "StorageClass: $SC_TO_USE" >> "$LOG_FILE"
     echo "PVC Status:" >> "$LOG_FILE"
     kubectl get pvc sanity-pvc -n $TEST_NS -o wide >> "$LOG_FILE"
-    echo "File Permissions:" >> "$LOG_FILE"
+    echo "User-created File Permissions:" >> "$LOG_FILE"
     kubectl exec -n $TEST_NS storage-test -- ls -l /data/test.txt >> "$LOG_FILE"
+    echo "Root-created File Permissions:" >> "$LOG_FILE"
+    kubectl exec -n $TEST_NS root-test -- ls -l /data/root_test.txt >> "$LOG_FILE"
 
     echo -e "${GREEN}✅ Storage test completed${NC}"
 }
