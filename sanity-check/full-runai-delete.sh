@@ -29,6 +29,20 @@ fi
 
 echo -e "${BLUE}Starting Run.ai cleanup...${NC}"
 
+# Clean up runaiconfig first
+echo -e "${BLUE}Cleaning up runaiconfig...${NC}"
+if kubectl patch runaiconfigs.run.ai/runai -n runai -p '{"metadata":{"finalizers":[]}}' --type=merge; then
+    echo -e "${GREEN}✅ Successfully removed finalizers from runaiconfig${NC}"
+else
+    echo -e "${YELLOW}⚠️ No runaiconfig found or already cleaned up${NC}"
+fi
+
+if kubectl -n runai delete runaiconfig runai --force; then
+    echo -e "${GREEN}✅ Successfully deleted runaiconfig${NC}"
+else
+    echo -e "${YELLOW}⚠️ No runaiconfig found or already deleted${NC}"
+fi
+
 # Function to delete Helm releases
 delete_helm_releases() {
     echo -e "${BLUE}Deleting Helm releases...${NC}"
@@ -183,3 +197,4 @@ else
     echo -e "${BLUE}Cleanup stopped after Helm deletions${NC}"
     exit 0
 fi 
+
