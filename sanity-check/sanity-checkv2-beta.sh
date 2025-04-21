@@ -426,7 +426,7 @@ run_storage_tests() {
             TESTS_FAILED=true
             return 1
         fi
-    P1+r4632=1B5B32347E\P0+r\    SC_TO_USE="$STORAGE_CLASS"
+        SC_TO_USE="$STORAGE_CLASS"
         log_message "${YELLOW}Using specified StorageClass: $SC_TO_USE${NC}"
     else
         SC_TO_USE=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}')
@@ -505,7 +505,7 @@ EOF
             log_message "${RED}❌ PVC failed to bind${NC}"
             log_message "${YELLOW}PVC Status:${NC}"
             kubectl get pvc -n "$TEST_NS" sanity-pvc
-    P0+r\P1+r6B62=7F\P0+r\P1+r6B44=1B5B337E\P1+r6B68=1B4F48\P1+r4037=1B4F46\P1+r6B50=1B5B357E\P1+r6B4E=1B5B367E\        kubectl describe pvc -n "$TEST_NS" sanity-pvc
+            kubectl describe pvc -n "$TEST_NS" sanity-pvc
             TESTS_FAILED=true
         fi
     fi
@@ -813,121 +813,6 @@ EOF
 cleanup() {
     local exit_code=$?
     
-    # Always show the final summary table first
-    echo -e "\n${YELLOW}Final Test Summary${NC}"
-    echo -e "+----------------+------------------+------------------+"
-    echo -e "| Test Category  | Tests Performed  | Status          |"
-    echo -e "+----------------+------------------+------------------+"
-
-    # Storage Tests Summary
-    if [ "$STORAGE_ONLY" = "true" ]; then
-        if [ "${STORAGE_TEST_RESULT:-1}" -eq 0 ]; then
-            printf "| %-14s | %-16s | %-15s |\n" "Storage" "File Ownership" "✅"
-            all_passed=true
-        else
-            printf "| %-14s | %-16s | %-15s |\n" "Storage" "File Ownership" "⚠️"
-            all_passed=false
-        fi
-    fi
-
-    # Hardware Tests Summary
-    if [ "$HARDWARE_CHECK" = "true" ]; then
-        if [ "${TOTAL_CPU:-0}" -ge 24 ] && [ "${TOTAL_RAM_GB:-0}" -ge 24 ]; then
-            printf "| %-14s | %-16s | %-15s |\n" "Hardware" "CPU/RAM" "✅"
-        else
-            printf "| %-14s | %-16s | %-15s |\n" "Hardware" "CPU/RAM" "⚠️"
-            all_passed=false
-        fi
-        
-        if [ "${GPU_NODES:-0}" -gt 0 ]; then
-            printf "| %-14s | %-16s | %-15s |\n" "Hardware" "GPU Detection" "✅"
-        else
-            printf "| %-14s | %-16s | %-15s |\n" "Hardware" "GPU Detection" "⚠️"
-            all_passed=false
-        fi
-    fi
-
-    # Diagnostics Tests Summary
-    if [ "$DIAG" = "true" ]; then
-        if [ -f "runai-diagnostics.txt" ]; then
-            # Kubernetes Version
-            if grep -q "Kubernetes Cluster Version.*PASS" runai-diagnostics.txt; then
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "K8s Version" "✅"
-            else
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "K8s Version" "⚠️"
-                all_passed=false
-            fi
-
-            # Ingress
-            if grep -q "Ingress Controller.*PASS" runai-diagnostics.txt; then
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Ingress" "✅"
-            else
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Ingress" "⚠️"
-                all_passed=false
-            fi
-
-            # Prometheus
-            if grep -q "Prometheus.*PASS" runai-diagnostics.txt; then
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Prometheus" "✅"
-            else
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Prometheus" "⚠️"
-                all_passed=false
-            fi
-
-            # Node Connectivity
-            if grep -q "Node Connectivity.*PASS" runai-diagnostics.txt; then
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Node Connect" "✅"
-            else
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Node Connect" "⚠️"
-                all_passed=false
-            fi
-
-            # DNS Resolution
-            if grep -q "Backend FQDN Resolve.*PASS" runai-diagnostics.txt; then
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "DNS Resolve" "✅"
-            else
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "DNS Resolve" "⚠️"
-                all_passed=false
-            fi
-
-            # Backend Reachability
-            if grep -q "RunAI Backend Reachable.*PASS" runai-diagnostics.txt; then
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Backend" "✅"
-            else
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Backend" "⚠️"
-                all_passed=false
-            fi
-
-            # GPU Nodes
-            if grep -q "GPU Nodes.*PASS" runai-diagnostics.txt; then
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "GPU Nodes" "✅"
-            else
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "GPU Nodes" "⚠️"
-                all_passed=false
-            fi
-
-            # Storage Classes
-            if grep -q "Available StorageClasses.*PASS" runai-diagnostics.txt; then
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Storage" "✅"
-            else
-                printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Storage" "⚠️"
-                all_passed=false
-            fi
-        else
-            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "All Tests" "⚠️"
-            all_passed=false
-        fi
-    fi
-
-    echo -e "+----------------+------------------+------------------+"
-
-    # Overall Status Message
-    if [ "$all_passed" = true ]; then
-        echo -e "\n${GREEN}✅ All tests completed successfully!${NC}"
-    else
-        echo -e "\n${RED}⚠️ Some tests failed - please check the detailed results above${NC}"
-    fi
-
     # Now show cleanup message and perform cleanup
     if [ "$SILENT_MODE" = false ]; then
         echo -e "\n${YELLOW}Running cleanup...${NC}"
@@ -1101,7 +986,7 @@ if [ -n "$DIAG_DNS" ] && [ "$DIAG" != true ]; then
 fi
 
 # Skip storage tests if running with certificate and DNS parameters
-if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && [ -n "$DNS_NAME" ] && [ "$STORAGE_ONLY" != "true" ]; then
+if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && [ -n "$DNS_NAME" ]; then
     STORAGE_ONLY=false
 fi
 
@@ -1194,7 +1079,7 @@ echo -e "| Test Category  | Tests Performed  | Status          |"
 echo -e "+----------------+------------------+------------------+"
 
 # Storage Tests Summary
-if [ "$STORAGE_ONLY" = "true" ] || [ -n "$STORAGE_CLASS" ]; then
+if [ "$STORAGE_ONLY" = "true" ]; then
     if [ "${STORAGE_TEST_RESULT:-1}" -eq 0 ]; then
         printf "| %-14s | %-16s | %-15s |\n" "Storage" "File Ownership" "✅"
         all_passed=true
@@ -1289,16 +1174,6 @@ if [ "$DIAG" = "true" ]; then
         fi
     else
         printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "All Tests" "⚠️"
-        all_passed=false
-    fi
-fi
-
-# TLS Tests Summary
-if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && [ -n "$DNS_NAME" ]; then
-    if [ "$TLS_SECRET_CREATED" = true ] && [ "$INGRESS_CREATED" = true ] && [ "$HTTPS_ACCESS_OK" = true ]; then
-        printf "| %-14s | %-16s | %-15s |\n" "TLS" "All Tests" "✅"
-    else
-        printf "| %-14s | %-16s | %-15s |\n" "TLS" "All Tests" "⚠️"
         all_passed=false
     fi
 fi
