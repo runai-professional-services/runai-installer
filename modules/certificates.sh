@@ -2,6 +2,13 @@
 
 # Function to setup certificates
 setup_certificates() {
+    # If --no-cert is set, skip certificate setup
+    if [ "$NO_CERT" = true ]; then
+        echo -e "${YELLOW}⚠️ Certificate setup skipped (--no-cert flag set)${NC}"
+        echo -e "${YELLOW}⚠️ Make sure you have valid certificates in the runai and runai-backend namespaces${NC}"
+        return 0
+    fi
+
     # Create certificates directory with timestamp
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
     CERT_DIR="./certificates"
@@ -18,13 +25,24 @@ setup_certificates() {
         # Set certificate paths to the original files
         export CERT="$CERT_FILE"
         export KEY="$KEY_FILE"
-        export FULL="$CERT_FILE"  # Use the provided certificate as the full chain
+        
+        # Use provided CA cert if available, otherwise use the certificate as the full chain
+        if [ -n "$CA_CERT_FILE" ]; then
+            echo -e "${BLUE}Using provided CA certificate...${NC}"
+            export FULL="$CA_CERT_FILE"
+        else
+            export FULL="$CERT_FILE"  # Use the provided certificate as the full chain
+        fi
 
         # Backup the certificates (don't create secrets here)
         echo -e "${BLUE}Backing up certificates to $CERTS_BACKUP_DIR...${NC}"
         cp "$CERT_FILE" "$CERTS_BACKUP_DIR/runai.crt"
         cp "$KEY_FILE" "$CERTS_BACKUP_DIR/runai.key"
-        cp "$CERT_FILE" "$CERTS_BACKUP_DIR/full-chain.pem"
+        if [ -n "$CA_CERT_FILE" ]; then
+            cp "$CA_CERT_FILE" "$CERTS_BACKUP_DIR/rootCA.pem"
+        else
+            cp "$CERT_FILE" "$CERTS_BACKUP_DIR/full-chain.pem"
+        fi
 
         echo -e "${GREEN}✅ Using provided certificates and backed up to $CERTS_BACKUP_DIR${NC}"
     else

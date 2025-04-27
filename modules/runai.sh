@@ -1,5 +1,17 @@
 #!/bin/bash
 
+# Create namespaces at the very beginning
+kubectl create namespace runai 2>/dev/null || true
+kubectl create namespace runai-backend 2>/dev/null || true
+
+# Function to create namespaces
+create_namespaces() {
+    echo -e "${BLUE}Creating namespaces...${NC}"
+    kubectl create namespace runai 2>/dev/null || true
+    kubectl create namespace runai-backend 2>/dev/null || true
+    echo -e "${GREEN}✅ Namespaces created${NC}"
+}
+
 # Function to check if Run.ai is already installed
 check_runai_installed() {
     echo -e "${BLUE}Checking if Run.ai is already installed...${NC}"
@@ -34,18 +46,112 @@ check_runai_installed() {
     fi
 }
 
+# Function to get authentication token
+get_auth_token() {
+    local max_attempts=50
+    local attempt=1
+    local auth_url="https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token"
+    
+    echo -ne "Waiting for back-end token...\r"
+    
+    while [ $attempt -le $max_attempts ]; do
+        # Store the raw response for debugging
+        raw_response=$(curl --insecure --silent --location --request POST "$auth_url" \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'grant_type=password' \
+            --data-urlencode 'client_id=runai' \
+            --data-urlencode 'username=test@run.ai' \
+            --data-urlencode 'password=Abcd!234' \
+            --data-urlencode 'scope=openid' \
+            --data-urlencode 'response_type=id_token')
+
+        # Debug output
+        echo "Raw response: $raw_response" >> "$LOG_FILE"
+
+        # Try to parse the token, with error handling
+        if [ -n "$raw_response" ]; then
+            # Check if the response is valid JSON
+            if echo "$raw_response" | jq . >/dev/null 2>&1; then
+                token=$(echo "$raw_response" | jq -r '.access_token // empty')
+                if [ -n "$token" ] && [ "$token" != "null" ]; then
+                    return 0
+                fi
+            fi
+        fi
+
+        sleep 5
+        ((attempt++))
+    done
+    
+    return 1
+}
+
+# Function to check if authentication service is responding
+check_auth_service() {
+    local max_attempts=50
+    local attempt=1
+    local auth_url="https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token"
+    
+    echo -e "${BLUE}Checking if authentication service is responding...${NC}"
+    
+    while [ $attempt -le $max_attempts ]; do
+        # Try a POST request with minimal data
+        if curl --insecure --silent --request POST "$auth_url" \
+            --header 'Content-Type: application/x-www-form-urlencoded' \
+            --data-urlencode 'grant_type=password' \
+            --data-urlencode 'client_id=runai' \
+            --data-urlencode 'username=test@run.ai' \
+            --data-urlencode 'password=Abcd!234' \
+            --data-urlencode 'scope=openid' \
+            --data-urlencode 'response_type=id_token' >/dev/null 2>&1; then
+            echo -e "${GREEN}✅ Authentication service is responding${NC}"
+            return 0
+        fi
+        
+        echo -ne "⏳ Waiting for authentication service to respond... (Attempt $attempt/$max_attempts)\r"
+        sleep 5
+        ((attempt++))
+    done
+    
+    echo -e "\n${RED}❌ Authentication service is not responding after $max_attempts attempts${NC}"
+    return 1
+}
+
 # Function to install Run.ai
 install_runai() {
-    # Create namespaces
-    echo -e "${BLUE}Creating namespaces...${NC}"
-    if ! log_command "kubectl create ns runai" "Create runai namespace"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to create runai namespace, continuing...${NC}"
-    fi
+    # Create namespaces first
+    create_namespaces
 
     # If not in cluster-only mode, install the backend
     if [ "$CLUSTER_ONLY" != true ]; then
-        if ! log_command "kubectl create ns runai-backend" "Create runai-backend namespace"; then
-            echo -e "${YELLOW}⚠️ Warning: Failed to create runai-backend namespace, continuing...${NC}"
+        # Handle certificates only if not using --no-cert
+        if [ "$NO_CERT" != true ]; then
+            echo -e "${BLUE}Creating/updating TLS secrets...${NC}"
+
+            # Delete existing secrets first
+            kubectl -n runai-backend delete secret runai-backend-tls 2>/dev/null || true
+            kubectl -n runai-backend delete secret runai-ca-cert 2>/dev/null || true
+            kubectl -n runai delete secret runai-ca-cert 2>/dev/null || true
+
+            # Create new secrets
+            if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY" "Create TLS secret"; then
+                echo -e "${RED}❌ Failed to create TLS secret${NC}"
+                exit 1
+            fi
+
+            if ! log_command "kubectl create secret generic runai-ca-cert -n runai-backend --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai-backend namespace"; then
+                echo -e "${RED}❌ Failed to create CA cert secret in runai-backend namespace${NC}"
+                exit 1
+            fi
+
+            if ! log_command "kubectl create secret generic runai-ca-cert -n runai --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai namespace"; then
+                echo -e "${RED}❌ Failed to create CA cert secret in runai namespace${NC}"
+                exit 1
+            fi
+
+            echo -e "${GREEN}✅ Certificate secrets created successfully${NC}"
+        else
+            echo -e "${BLUE}Skipping certificate secrets creation as requested with --no-cert flag...${NC}"
         fi
 
         # Apply repository secret if provided
@@ -104,33 +210,27 @@ install_runai() {
         export cluster_version=$RUNAI_VERSION
         export cluster_name=runai-cluster
 
-        echo -e "${BLUE}Getting authentication token from existing backend...${NC}"
-        while true; do
-            token=$(curl --insecure --location --request POST "https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token" \
-                --header 'Content-Type: application/x-www-form-urlencoded' \
-                --data-urlencode 'grant_type=password' \
-                --data-urlencode 'client_id=runai' \
-                --data-urlencode 'username=test@run.ai' \
-                --data-urlencode 'password=Abcd!234' \
-                --data-urlencode 'scope=openid' \
-                --data-urlencode 'response_type=id_token' | jq -r .access_token)
+        # Check if authentication service is responding before trying to get token
+        if ! check_auth_service; then
+            echo -e "${RED}❌ Authentication service is not available. Please check the backend installation.${NC}"
+            exit 1
+        fi
 
-            if [ ! -z "$token" ] && [ "$token" != "null" ]; then
-                break
-            fi
-            echo -e "${BLUE}⏳ Waiting for authentication service...${NC}"
-            sleep 5
-        done
+        # Get authentication token
+        if ! get_auth_token; then
+            echo -e "${RED}❌ Failed to get authentication token. Please check the backend installation.${NC}"
+            exit 1
+        fi
 
         # Create cluster and get UUID
         echo -e "${BLUE}Creating cluster...${NC}"
-        if ! log_command "curl --insecure -X 'POST' \"https://$control_plane_domain/api/v1/clusters\" -H 'accept: application/json' -H \"Authorization: Bearer $token\" -H 'Content-Type: application/json' -d '{\"name\": \"${cluster_name}\", \"version\": \"${cluster_version}\"}'" "Create cluster"; then
+        if ! log_command "curl --insecure --silent -X 'POST' \"https://$control_plane_domain/api/v1/clusters\" -H 'accept: application/json' -H \"Authorization: Bearer $token\" -H 'Content-Type: application/json' -d '{\"name\": \"${cluster_name}\", \"version\": \"${cluster_version}\"}'" "Create cluster"; then
             echo -e "${RED}❌ Failed to create cluster${NC}"
             exit 1
         fi
 
         # Get UUID
-        uuid=$(curl --insecure -X 'GET' \
+        uuid=$(curl --insecure --silent -X 'GET' \
             "https://$control_plane_domain/api/v1/clusters" \
             -H 'accept: application/json' \
             -H "Authorization: Bearer $token" \
@@ -139,7 +239,7 @@ install_runai() {
         # Get installation string
         echo -e "${BLUE}Getting installation information...${NC}"
         while true; do
-            installationStr=$(curl --insecure "https://$control_plane_domain/api/v1/clusters/$uuid/cluster-install-info?version=$cluster_version" \
+            installationStr=$(curl --insecure --silent "https://$control_plane_domain/api/v1/clusters/$uuid/cluster-install-info?version=$cluster_version" \
                 -H 'accept: application/json' \
                 -H "Authorization: Bearer $token" \
                 -H 'Content-Type: application/json')
@@ -149,7 +249,7 @@ install_runai() {
             if grep -q "helm" input.json; then
                 break
             fi
-            echo -e "${BLUE}⏳ Waiting for valid installation information...${NC}"
+            echo -ne "⏳ Waiting for valid installation information...\r"
             sleep 5
         done
     else
@@ -207,33 +307,27 @@ install_runai() {
         export cluster_version=$RUNAI_VERSION
         export cluster_name=runai-cluster
 
-        echo -e "${BLUE}Getting authentication token from existing backend...${NC}"
-        while true; do
-            token=$(curl --insecure --location --request POST "https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token" \
-                --header 'Content-Type: application/x-www-form-urlencoded' \
-                --data-urlencode 'grant_type=password' \
-                --data-urlencode 'client_id=runai' \
-                --data-urlencode 'username=test@run.ai' \
-                --data-urlencode 'password=Abcd!234' \
-                --data-urlencode 'scope=openid' \
-                --data-urlencode 'response_type=id_token' | jq -r .access_token)
+        # Check if authentication service is responding before trying to get token
+        if ! check_auth_service; then
+            echo -e "${RED}❌ Authentication service is not available. Please check the backend installation.${NC}"
+            exit 1
+        fi
 
-            if [ ! -z "$token" ] && [ "$token" != "null" ]; then
-                break
-            fi
-            echo -e "${BLUE}⏳ Waiting for authentication service...${NC}"
-            sleep 5
-        done
+        # Get authentication token
+        if ! get_auth_token; then
+            echo -e "${RED}❌ Failed to get authentication token. Please check the backend installation.${NC}"
+            exit 1
+        fi
 
         # Create cluster and get UUID
         echo -e "${BLUE}Creating cluster...${NC}"
-        if ! log_command "curl --insecure -X 'POST' \"https://$control_plane_domain/api/v1/clusters\" -H 'accept: application/json' -H \"Authorization: Bearer $token\" -H 'Content-Type: application/json' -d '{\"name\": \"${cluster_name}\", \"version\": \"${cluster_version}\"}'" "Create cluster"; then
+        if ! log_command "curl --insecure --silent -X 'POST' \"https://$control_plane_domain/api/v1/clusters\" -H 'accept: application/json' -H \"Authorization: Bearer $token\" -H 'Content-Type: application/json' -d '{\"name\": \"${cluster_name}\", \"version\": \"${cluster_version}\"}'" "Create cluster"; then
             echo -e "${RED}❌ Failed to create cluster${NC}"
             exit 1
         fi
 
         # Get UUID
-        uuid=$(curl --insecure -X 'GET' \
+        uuid=$(curl --insecure --silent -X 'GET' \
             "https://$control_plane_domain/api/v1/clusters" \
             -H 'accept: application/json' \
             -H "Authorization: Bearer $token" \
@@ -242,7 +336,7 @@ install_runai() {
         # Get installation string
         echo -e "${BLUE}Getting installation information...${NC}"
         while true; do
-            installationStr=$(curl --insecure "https://$control_plane_domain/api/v1/clusters/$uuid/cluster-install-info?version=$cluster_version" \
+            installationStr=$(curl --insecure --silent "https://$control_plane_domain/api/v1/clusters/$uuid/cluster-install-info?version=$cluster_version" \
                 -H 'accept: application/json' \
                 -H "Authorization: Bearer $token" \
                 -H 'Content-Type: application/json')
@@ -252,7 +346,7 @@ install_runai() {
             if grep -q "helm" input.json; then
                 break
             fi
-            echo -e "${BLUE}⏳ Waiting for valid installation information...${NC}"
+            echo -ne "⏳ Waiting for valid installation information...\r"
             sleep 5
         done
     fi
@@ -279,14 +373,7 @@ install_runai() {
     echo "$formatted_command" > install.sh
     chmod +x install.sh
 
-    echo -e "${GREEN}✅ Run.ai installation script created successfully!${NC}"
-
-    # Log the contents of install.sh
-    echo -e "${BLUE}Contents of install.sh:${NC}"
-    echo -e "${YELLOW}$(cat install.sh)${NC}"
-    echo -e "\n${BLUE}Executing installation script...${NC}"
-
-    # Execute the installation script
+    # Execute the installation script silently
     echo -e "${BLUE}Installing Run.ai cluster components...${NC}"
 
     # Log the full command
@@ -294,16 +381,16 @@ install_runai() {
     echo "$(cat install.sh)" >> "$LOG_FILE"
 
     # Execute install.sh silently and log all output
-    echo -e "${BLUE}Executing installation script...${NC}"
     if ./install.sh >> "$LOG_FILE" 2>&1; then
-        echo -e "${GREEN}✅ Run.ai cluster components installed successfully${NC}"
+        echo -e "${GREEN}✅ Run.ai cluster installation started${NC}"
     else
         echo -e "${RED}❌ Run.ai installation failed. Please check the logs at $LOG_FILE for details${NC}"
         exit 1
     fi
 
     # Wait for all pods in runai namespace to be ready
-    echo -e "${BLUE}Waiting for all pods in the 'runai' namespace to be running...${NC}"
+    echo -ne "⏳ Waiting... (0 pods Running out of 29)    \r"
+
     while true; do
         TOTAL_PODS=$(kubectl get pods -n runai --no-headers | wc -l)
         RUNNING_PODS=$(kubectl get pods -n runai --no-headers | grep "Running" | wc -l)

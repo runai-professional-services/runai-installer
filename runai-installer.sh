@@ -18,6 +18,7 @@ show_usage() {
     echo "  --ip IP_ADDRESS        Required if --internal-dns or --patch-nginx is set"
     echo "  --cert CERT_FILE       Use provided certificate file instead of generating self-signed"
     echo "  --key KEY_FILE         Use provided key file instead of generating self-signed"
+    echo "  --cacert CA_CERT_FILE  Use provided CA certificate file (e.g., rootCA.pem)"
     echo "  --no-cert              Skip certificate setup (use existing certificates)"
     echo "  --knative              Install Knative serving"
     echo "  --nginx                Install Nginx Ingress Controller (no --ip needed)"
@@ -36,6 +37,9 @@ show_usage() {
     echo ""
     echo "  # Using custom certificates"
     echo "  $0 --dns kirson.runai.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret /root/jfrog"
+    echo ""
+    echo "  # Using custom certificates with CA cert"
+    echo "  $0 --dns kirson.runai.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem --repo-secret /root/jfrog"
     echo ""
     echo "  # Installing with additional components"
     echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --nginx --prometheus --gpu-operator --repo-secret /root/jfrog"
@@ -71,6 +75,11 @@ validate_params() {
         echo -e "${RED}Error: --cert is required when using --key${NC}"
         show_usage
     fi
+
+    if [ -n "$CA_CERT_FILE" ] && [ ! -f "$CA_CERT_FILE" ]; then
+        echo -e "${RED}Error: CA certificate file not found: $CA_CERT_FILE${NC}"
+        show_usage
+    fi
 }
 
 # Function to load environment variables
@@ -80,6 +89,11 @@ load_env() {
     mkdir -p "$LOGS_DIR"
     LOG_FILE="$LOGS_DIR/installation_$(date +%Y%m%d_%H%M%S).log"
     echo "Installation started at $(date)" > "$LOG_FILE"
+
+    # Create symlink to latest log
+    ln -sf "$LOG_FILE" "$LOGS_DIR/latest.log"
+    echo -e "${BLUE}Log file created: $LOG_FILE${NC}"
+    echo -e "${BLUE}Latest log symlink: $LOGS_DIR/latest.log${NC}"
 
     # Export common variables
     export GREEN YELLOW BLUE RED NC
@@ -152,6 +166,14 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --cacert)
+            CA_CERT_FILE="$2"
+            if [ ! -f "$CA_CERT_FILE" ]; then
+                echo -e "${RED}❌ CA certificate file not found: $CA_CERT_FILE${NC}"
+                exit 1
+            fi
+            shift 2
+            ;;
         --no-cert)
             NO_CERT=true
             shift
@@ -202,33 +224,16 @@ done
 load_env
 validate_params
 
-# Display configuration summary
-echo -e "\n${GREEN}"
-cat << "EOF"
-╔═══════════════════════════════════════════════════════════════════════╗
-║                                                                       ║
-║              Welcome to AI Factory Installation Wizard                ║
-║                                                                       ║
-╚═══════════════════════════════════════════════════════════════════════╝
-EOF
-echo -e "${NC}"
-
-echo -e "${BLUE}Configuration:${NC}"
-echo -e "DNS Name: $DNS_NAME"
-echo -e "Run.ai Version: $RUNAI_VERSION"
-echo -e "Cluster Only: $([ "$CLUSTER_ONLY" = true ] && echo "Yes" || echo "No")"
-echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || echo "No")"
-echo -e "Install Nginx: $([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No")"
-echo -e "Patch Nginx: $([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")"
-echo -e "Install Prometheus: $([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")"
-echo -e "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"
-echo -e "Install Knative: $([ "$INSTALL_KNATIVE" = true ] && echo "Yes" || echo "No")"
-echo -e "Skip Certificate Setup: $([ "$NO_CERT" = true ] && echo "Yes" || echo "No")"
-echo -e "Custom Certificates: $([ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && echo "Yes" || echo "No")"
-echo -e "Repository Secret: $([ -n "$REPO_SECRET" ] && echo "$REPO_SECRET" || echo "None")"
-echo -e "BCM Configuration: $([ "$BCM_CONFIG" = true ] && echo "Yes" || echo "No")"
+# Create namespaces first
+echo -e "${BLUE}Creating namespaces...${NC}"
+kubectl create namespace runai 2>/dev/null || true
+kubectl create namespace runai-backend 2>/dev/null || true
+echo -e "${GREEN}✅ Namespaces created${NC}"
 
 # Source and execute modules based on configuration
+source ./modules/log.sh
+init_logging
+
 source ./modules/helm.sh
 check_helm_version
 
@@ -266,10 +271,37 @@ fi
 source ./modules/runai.sh
 install_runai
 
-source ./modules/bcm.sh
-if [ "$BCM_CONFIG" = true ]; then
+# Only source and configure BCM if the module exists and BCM_CONFIG is true
+if [ "$BCM_CONFIG" = true ] && [ -f "./modules/bcm.sh" ]; then
+    source ./modules/bcm.sh
     configure_bcm
 fi
+
+# Display configuration summary
+echo -e "\n${GREEN}"
+cat << "EOF" > /dev/null
+╔═══════════════════════════════════════════════════════════════════════╗
+║                                                                       ║
+║              Welcome to AI Factory Installation Wizard                ║
+║                                                                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+EOF
+echo -e "${NC}"
+
+echo -e "${BLUE}Configuration:${NC}"
+echo -e "DNS Name: $DNS_NAME"
+echo -e "Run.ai Version: $RUNAI_VERSION"
+echo -e "Cluster Only: $([ "$CLUSTER_ONLY" = true ] && echo "Yes" || echo "No")"
+echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Nginx: $([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No")"
+echo -e "Patch Nginx: $([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Prometheus: $([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")"
+echo -e "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Knative: $([ "$INSTALL_KNATIVE" = true ] && echo "Yes" || echo "No")"
+echo -e "Skip Certificate Setup: $([ "$NO_CERT" = true ] && echo "Yes" || echo "No")"
+echo -e "Custom Certificates: $([ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && echo "Yes" || echo "No")"
+echo -e "Repository Secret: $([ -n "$REPO_SECRET" ] && echo "$REPO_SECRET" || echo "None")"
+echo -e "BCM Configuration: $([ "$BCM_CONFIG" = true ] && echo "Yes" || echo "No")"
 
 # Final success message
 echo -e "\n${GREEN}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
@@ -281,8 +313,15 @@ echo -e "\n${BLUE}You can access Run.ai at: ${GREEN}https://$DNS_NAME${NC}"
 echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / Abcd!234${NC}\n"
 
 # Add certificate instructions if using self-signed certificates
-if [ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ]; then
-    echo -e "${YELLOW}For self-signed certificates, please copy certificates/rootCA.pem to your browser or operating system${NC}"
+if [ -z "$CERT_FILE" ] && [ -z "$KEY_FILE" ]; then
+    echo -e "${YELLOW}For self-signed certificates:${NC}"
+    echo -e "${YELLOW}1. Copy the root CA certificate to your browser:${NC}"
+    echo -e "${YELLOW}   - Chrome: Settings -> Privacy and Security -> Security -> Manage Certificates -> Authorities -> Import${NC}"
+    echo -e "${YELLOW}   - Firefox: Settings -> Privacy & Security -> Certificates -> View Certificates -> Authorities -> Import${NC}"
+    echo -e "${YELLOW}2. For Ubuntu systems, install the certificate:${NC}"
+    echo -e "${YELLOW}   - Copy the certificate: ${GREEN}sudo cp ./certificates/rootCA.pem /usr/local/share/ca-certificates/runai-ca.crt${NC}"
+    echo -e "${YELLOW}   - Update the certificate store: ${GREEN}sudo update-ca-certificates --fresh${NC}"
+    echo -e "${YELLOW}3. Select the file: ${GREEN}./certificates/rootCA.pem${NC}"
     echo
 fi
 

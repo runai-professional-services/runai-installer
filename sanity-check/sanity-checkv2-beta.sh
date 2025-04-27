@@ -180,6 +180,22 @@ run_diagnostics_check() {
 check_required_components() {
     echo -e "${YELLOW}Checking required components...${NC}"
     
+    # Check Helm version
+    if ! command -v helm &>/dev/null; then
+        echo -e "${RED}❌ Helm not found${NC}"
+    else
+        HELM_VERSION=$(helm version --short | grep -oP 'v\K\d+\.\d+')
+        if [ -n "$HELM_VERSION" ]; then
+            if (( $(echo "$HELM_VERSION >= 3.14" | bc -l) )); then
+                echo -e "${GREEN}✅ Helm version: $HELM_VERSION${NC}"
+            else
+                echo -e "${RED}❌ Helm version $HELM_VERSION is too old. Required: 3.14 or later${NC}"
+            fi
+        else
+            echo -e "${RED}❌ Could not determine Helm version${NC}"
+        fi
+    fi
+    
     # Get all helm releases
     HELM_RELEASES=$(helm list -A 2>/dev/null)
     
