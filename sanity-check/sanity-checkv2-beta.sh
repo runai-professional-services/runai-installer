@@ -88,6 +88,15 @@ download_preinstall_diagnostics() {
             ;;
     esac
     
+    DIAG_BIN="./preinstall-diagnostics"
+    
+    # Check if file exists and is executable
+    if [ -f "$DIAG_BIN" ] && [ -x "$DIAG_BIN" ]; then
+        echo -e "${YELLOW}Using existing diagnostics binary: $DIAG_BIN${NC}"
+        echo -e "${GREEN}✅ Preinstall diagnostics tool ready${NC}"
+        return 0
+    fi
+    
     # Get latest release version
     LATEST_VERSION=$(curl -s https://api.github.com/repos/run-ai/preinstall-diagnostics/releases/latest | grep "tag_name" | cut -d '"' -f 4)
     if [ -z "$LATEST_VERSION" ]; then
@@ -96,52 +105,28 @@ download_preinstall_diagnostics() {
     fi
 
     # Construct download URL
-    DOWNLOAD_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/${LATEST_VERSION}/runai-preinstall-${OS_TYPE}-${ARCH}"
-    DIAG_BIN="./runai-preinstall-${OS_TYPE}-${ARCH}"
+    DOWNLOAD_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/${LATEST_VERSION}/preinstall-diagnostics-${OS_TYPE}-${ARCH}"
     
-    # Download the binary if it doesn't exist
-    if [ ! -f "$DIAG_BIN" ]; then
-        echo -e "${YELLOW}Downloading from: $DOWNLOAD_URL${NC}"
-        if ! curl -L -o "$DIAG_BIN" "$DOWNLOAD_URL"; then
-            echo -e "${RED}❌ Failed to download preinstall diagnostics${NC}"
-            return 1
-        fi
-        chmod +x "$DIAG_BIN"
-    else
-        echo -e "${YELLOW}Using existing diagnostics binary: $DIAG_BIN${NC}"
+    # Download the binary
+    echo -e "${YELLOW}Downloading from: $DOWNLOAD_URL${NC}"
+    if ! curl -L -o "$DIAG_BIN" "$DOWNLOAD_URL"; then
+        echo -e "${RED}❌ Failed to download preinstall diagnostics${NC}"
+        return 1
     fi
+    chmod +x "$DIAG_BIN"
     
     echo -e "${GREEN}✅ Preinstall diagnostics tool ready${NC}"
-        return 0
+    return 0
 }
 
 # Function to run diagnostics check
 run_diagnostics_check() {
     log_message "\n${YELLOW}Running pre-installation diagnostics...${NC}"
 
-    # Determine OS and architecture
-    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-    ARCH=$(uname -m)
-
-    # Set the appropriate URL based on OS and architecture
-    if [ "$OS" = "linux" ] && [ "$ARCH" = "x86_64" ]; then
-        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-linux-amd64"
-    elif [ "$OS" = "darwin" ] && [ "$ARCH" = "arm64" ]; then
-        DIAG_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/v2.18.14/preinstall-diagnostics-darwin-arm64"
-    else
-        echo -e "${RED}❌ Unsupported OS/Architecture combination: $OS/$ARCH${NC}"
+    # Download diagnostics tool if not already downloaded
+    if ! download_preinstall_diagnostics; then
         return 1
     fi
-
-    # Download diagnostics tool
-    echo -e "${YELLOW}Downloading diagnostics tool...${NC}"
-    if ! curl -L -o preinstall-diagnostics "$DIAG_URL"; then
-        echo -e "${RED}❌ Failed to download diagnostics tool${NC}"
-        return 1
-    fi
-
-    # Make executable
-    chmod +x preinstall-diagnostics
 
     # Run diagnostics
     echo -e "${YELLOW}Running diagnostics...${NC}"
@@ -186,9 +171,6 @@ run_diagnostics_check() {
             fi
         fi
     done < runai-diagnostics.txt
-
-    # Cleanup removed to keep the binary file
-    # rm -f preinstall-diagnostics
 
     echo -e "\n${GREEN}✅ Diagnostics completed${NC}"
     return 0
@@ -863,7 +845,7 @@ all_passed=true
 # Function to echo only if not in silent mode
 log_message() {
     if [ "$SILENT_MODE" = false ]; then
-        echo -e "$@"
+        echo -e "$1"
     fi
 }
 
