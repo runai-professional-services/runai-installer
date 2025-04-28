@@ -389,10 +389,18 @@ install_runai() {
     fi
 
     # Wait for all pods in runai namespace to be ready
-    echo -ne "⏳ Waiting... (0 pods Running out of 29)    \r"
-
+    # First, wait for the total pod count to stabilize
     while true; do
         TOTAL_PODS=$(kubectl get pods -n runai --no-headers | wc -l)
+        sleep 2
+        NEW_TOTAL=$(kubectl get pods -n runai --no-headers | wc -l)
+        if [ "$TOTAL_PODS" -eq "$NEW_TOTAL" ]; then
+            break
+        fi
+    done
+
+    # Now show progress with stable total count
+    while true; do
         RUNNING_PODS=$(kubectl get pods -n runai --no-headers | grep "Running" | wc -l)
         NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
 
