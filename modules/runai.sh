@@ -380,8 +380,8 @@ install_runai() {
     echo "Executing installation commands:" >> "$LOG_FILE"
     echo "$(cat install.sh)" >> "$LOG_FILE"
 
-    # Execute install.sh silently and log all output
-    if ./install.sh >> "$LOG_FILE" 2>&1; then
+    # Execute install.sh with progress
+    if ./install.sh 2>&1 | tee -a "$LOG_FILE"; then
         echo -e "${GREEN}✅ Run.ai cluster installation started${NC}"
     else
         echo -e "${RED}❌ Run.ai installation failed. Please check the logs at $LOG_FILE for details${NC}"
