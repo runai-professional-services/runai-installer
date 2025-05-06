@@ -7,6 +7,12 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Debug information
+echo "Script started at $(date)"
+echo "Script path: $0"
+echo "Current directory: $(pwd)"
+echo "Arguments: $@"
+
 # Function to show usage
 show_usage() {
     echo -e "${BLUE}Usage: $0 [OPTIONS]${NC}"
@@ -242,6 +248,41 @@ if [ "$NO_CERT" != true ]; then
     setup_certificates
 fi
 
+# Configure BCM early if requested
+if [ "$BCM_CONFIG" = true ]; then
+    echo -e "${BLUE}BCM configuration requested...${NC}"
+    
+    if [ ! -f "./modules/bcm.sh" ]; then
+        echo -e "${RED}❌ Error: BCM module not found at ./modules/bcm.sh${NC}"
+        exit 1
+    fi
+
+    # Ensure required variables are set
+    if [ -z "$DNS_NAME" ]; then
+        echo -e "${RED}❌ Error: DNS_NAME is required for BCM configuration${NC}"
+        exit 1
+    fi
+
+    # Ensure TEMP_DIR is set
+    if [ -z "$TEMP_DIR" ]; then
+        TEMP_DIR="/tmp"
+    fi
+
+    # Source and execute BCM module
+    echo -e "${BLUE}Loading BCM module...${NC}"
+    source ./modules/bcm.sh
+    echo -e "${BLUE}BCM module loaded successfully${NC}"
+    
+    echo -e "${BLUE}Starting BCM configuration...${NC}"
+    if configure_bcm; then
+        echo -e "${GREEN}✅ Bright Cluster Manager configuration completed successfully${NC}"
+    else
+        echo -e "${RED}❌ Bright Cluster Manager configuration failed${NC}"
+        echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
+        exit 1
+    fi
+fi
+
 source ./modules/dns.sh
 if [ "$INTERNAL_DNS" = true ]; then
     patch_coredns
@@ -270,12 +311,6 @@ fi
 
 source ./modules/runai.sh
 install_runai
-
-# Only source and configure BCM if the module exists and BCM_CONFIG is true
-if [ "$BCM_CONFIG" = true ] && [ -f "./modules/bcm.sh" ]; then
-    source ./modules/bcm.sh
-    configure_bcm
-fi
 
 # Display configuration summary
 echo -e "\n${GREEN}"

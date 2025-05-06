@@ -188,18 +188,14 @@ install_runai() {
         fi
 
         # Wait for pods to be ready
-        echo -e "${BLUE}Waiting for all pods in the 'runai-backend' namespace to be running...${NC}"
+        echo -e "${BLUE}Waiting for Run.ai backend pods to be ready...${NC}"
         while true; do
             TOTAL_PODS=$(kubectl get pods -n runai-backend --no-headers | wc -l)
             RUNNING_PODS=$(kubectl get pods -n runai-backend --no-headers | grep "Running" | wc -l)
             NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
 
-            # Use carriage return to update the same line
-            echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
-
             if [ "$NOT_READY" -eq 0 ]; then
-                # Print a newline and completion message when done
-                echo -e "\n${GREEN}✅ All pods in 'runai-backend' namespace are now running!${NC}"
+                echo -e "${GREEN}✅ All Run.ai backend pods are ready${NC}"
                 break
             fi
             sleep 5
@@ -400,16 +396,13 @@ install_runai() {
     done
 
     # Now show progress with stable total count
+    echo -e "${BLUE}Waiting for Run.ai cluster pods to be ready...${NC}"
     while true; do
         RUNNING_PODS=$(kubectl get pods -n runai --no-headers | grep "Running" | wc -l)
         NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
 
-        # Use carriage return to update the same line
-        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
-
         if [ "$NOT_READY" -eq 0 ]; then
-            # Print a newline and completion message when done
-            echo -e "\n${GREEN}✅ All pods in 'runai' namespace are now running!${NC}"
+            echo -e "${GREEN}✅ All Run.ai cluster pods are ready${NC}"
             break
         fi
         sleep 5
