@@ -48,6 +48,13 @@ install_nginx() {
 
 # Function to patch Nginx Ingress Controller service
 patch_nginx_service() {
+    # Validate IP_ADDRESS is set
+    if [ -z "$IP_ADDRESS" ]; then
+        echo -e "${RED}❌ Error: IP address is required for patching Nginx Ingress Controller${NC}"
+        echo -e "${YELLOW}Please provide the IP address using the --ip parameter${NC}"
+        return 1
+    fi
+
     echo -e "${BLUE}Patching Nginx Ingress Controller service with IP: $IP_ADDRESS${NC}"
 
     # First, check if the service exists
@@ -63,12 +70,28 @@ patch_nginx_service() {
         return 0
     fi
 
-    # Simple direct patch
-    if ! log_command "kubectl -n ingress-nginx patch svc ingress-nginx-controller --type='merge' -p \"{\\\"spec\\\":{\\\"externalIPs\\\":[\\\"$IP_ADDRESS\\\"]}}\"" "Patch Nginx Ingress Controller service"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to patch Nginx Ingress service, you may need to manually set externalIPs to $IP_ADDRESS${NC}"
+    # If there's a different IP set, show a warning
+    if [ -n "$CURRENT_IP" ]; then
+        echo -e "${YELLOW}⚠️ Warning: Nginx Ingress Controller currently has externalIP: $CURRENT_IP${NC}"
+        echo -e "${YELLOW}⚠️ This will be changed to: $IP_ADDRESS${NC}"
+    fi
+
+    # Apply the patch directly
+    if ! log_command "kubectl patch svc -n ingress-nginx ingress-nginx-controller --type='merge' -p '{\"spec\":{\"externalIPs\":[\"$IP_ADDRESS\"]}}'" "Patch Nginx Ingress Controller service"; then
+        echo -e "${RED}❌ Failed to patch Nginx Ingress service${NC}"
+        echo -e "${YELLOW}⚠️ You may need to manually set externalIPs to $IP_ADDRESS${NC}"
         return 1
     fi
 
-    echo -e "${GREEN}✅ Successfully patched Nginx Ingress Controller with externalIP: $IP_ADDRESS${NC}"
+    # Verify the patch was applied
+    NEW_IP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
+    if [ "$NEW_IP" = "$IP_ADDRESS" ]; then
+        echo -e "${GREEN}✅ Successfully patched Nginx Ingress Controller with externalIP: $IP_ADDRESS${NC}"
+    else
+        echo -e "${RED}❌ Patch appeared to succeed but IP was not updated correctly${NC}"
+        echo -e "${YELLOW}⚠️ Current IP: $NEW_IP, Expected: $IP_ADDRESS${NC}"
+        return 1
+    fi
+
     return 0
 } 
