@@ -72,7 +72,7 @@ log_command() {
 
 # Function to download preinstall diagnostics tool
 download_preinstall_diagnostics() {
-    echo -e "${YELLOW}Downloading preinstall diagnostics tool...${NC}"
+    echo -e "${YELLOW}Setting up preinstall diagnostics tool...${NC}"
     
     # Determine OS type and architecture
     OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -97,23 +97,36 @@ download_preinstall_diagnostics() {
         return 0
     fi
     
-    # Get latest release version
-    LATEST_VERSION=$(curl -s https://api.github.com/repos/run-ai/preinstall-diagnostics/releases/latest | grep "tag_name" | cut -d '"' -f 4)
-    if [ -z "$LATEST_VERSION" ]; then
-        echo -e "${RED}❌ Failed to get latest version of preinstall diagnostics${NC}"
+    # Check if zip file exists
+    if [ ! -f "preinstall-diagnostics.zip" ]; then
+        echo -e "${RED}❌ preinstall-diagnostics.zip not found in current directory${NC}"
         return 1
     fi
 
-    # Construct download URL
-    DOWNLOAD_URL="https://github.com/run-ai/preinstall-diagnostics/releases/download/${LATEST_VERSION}/preinstall-diagnostics-${OS_TYPE}-${ARCH}"
+    # Create a temporary directory for extraction
+    TMP_DIR=$(mktemp -d)
     
-    # Download the binary
-    echo -e "${YELLOW}Downloading from: $DOWNLOAD_URL${NC}"
-    if ! curl -L -o "$DIAG_BIN" "$DOWNLOAD_URL"; then
-        echo -e "${RED}❌ Failed to download preinstall diagnostics${NC}"
+    # Unzip the file
+    if ! unzip -q preinstall-diagnostics.zip -d "$TMP_DIR"; then
+        echo -e "${RED}❌ Failed to unzip preinstall-diagnostics.zip${NC}"
+        rm -rf "$TMP_DIR"
         return 1
     fi
+
+    # Find the correct binary for current OS and architecture
+    BINARY_NAME="preinstall-diagnostics-${OS_TYPE}-${ARCH}"
+    if [ ! -f "$TMP_DIR/$BINARY_NAME" ]; then
+        echo -e "${RED}❌ Binary for ${OS_TYPE}-${ARCH} not found in zip file${NC}"
+        rm -rf "$TMP_DIR"
+        return 1
+    fi
+
+    # Copy and make executable
+    cp "$TMP_DIR/$BINARY_NAME" "$DIAG_BIN"
     chmod +x "$DIAG_BIN"
+
+    # Cleanup
+    rm -rf "$TMP_DIR"
     
     echo -e "${GREEN}✅ Preinstall diagnostics tool ready${NC}"
     return 0
@@ -324,6 +337,10 @@ check_hardware_requirements() {
         ((NODE_COUNT++))
         echo -e "${YELLOW}Checking node: ${GREEN}$node${NC}"
 
+        # Get OS information
+        OS_INFO=$(kubectl get nodes "$node" -o wide --no-headers | awk '{for(i=8;i<=NF-1;i++) printf "%s ", $i; print ""}' | sed 's/ $//' | sed 's/containerd.*$//')
+        echo -e "└─ OS: ${YELLOW}$OS_INFO${NC}"
+
         # Get CPU cores
         CPU_CORES=$(kubectl get node "$node" -o jsonpath='{.status.capacity.cpu}')
         if [ -z "$CPU_CORES" ]; then
@@ -412,10 +429,93 @@ check_hardware_requirements() {
     fi
 }
 
+# Function to check GPU node storage
+check_gpu_node_storage() {
+    log_message "${YELLOW}Checking ephemeral storage on GPU nodes...${NC}"
+    local MIN_STORAGE_GB=150
+    local TESTS_FAILED=false
+
+    # Get GPU nodes
+    local gpu_nodes
+    gpu_nodes=$(kubectl get nodes -o json | jq -r '.items[] | select(.status.allocatable["nvidia.com/gpu"]) | .metadata.name' 2>/dev/null)
+
+    # Check if jq is available
+    if ! command -v jq &> /dev/null; then
+        log_message "${RED}❌ 'jq' is required but not installed. Please install it first.${NC}"
+        return 1
+    fi
+
+    if [ -z "$gpu_nodes" ]; then
+        log_message "${YELLOW}⚠️ No nodes with GPU found.${NC}"
+        return 0
+    fi
+
+    # Function to convert to bytes
+    to_bytes() {
+        local value="$1"
+        if [[ $value == *Ki ]]; then
+            echo $(( ${value%Ki} * 1024 ))
+        elif [[ $value == *Mi ]]; then
+            echo $(( ${value%Mi} * 1024 * 1024 ))
+        elif [[ $value == *Gi ]]; then
+            echo $(( ${value%Gi} * 1024 * 1024 * 1024 ))
+        else
+            echo "$value"
+        fi
+    }
+
+    # Iterate through GPU nodes
+    while read -r node; do
+        log_message "${YELLOW}-----------------------------------------${NC}"
+        log_message "${YELLOW}🎯 GPU Node: $node${NC}"
+
+        capacity=$(kubectl get node "$node" -o jsonpath="{.status.capacity['ephemeral-storage']}")
+        allocatable=$(kubectl get node "$node" -o jsonpath="{.status.allocatable['ephemeral-storage']}")
+
+        cap_bytes=$(to_bytes "$capacity")
+        alloc_bytes=$(to_bytes "$allocatable")
+        used_bytes=$((cap_bytes - alloc_bytes))
+        used_pct=$((used_bytes * 100 / cap_bytes))
+
+        to_gib() { echo "$(( $1 / 1024 / 1024 / 1024 ))Gi"; }
+
+        log_message "${YELLOW}📦 Capacity:    $(to_gib $cap_bytes)${NC}"
+        log_message "${YELLOW}📉 Allocatable: $(to_gib $alloc_bytes)${NC}"
+        log_message "${YELLOW}💾 Used:        $(to_gib $used_bytes) (${used_pct}%)${NC}"
+
+        # Check if capacity meets minimum requirement
+        if [ $((cap_bytes / 1024 / 1024 / 1024)) -lt $MIN_STORAGE_GB ]; then
+            log_message "${RED}❌ Insufficient storage: Less than ${MIN_STORAGE_GB}GB available${NC}"
+            TESTS_FAILED=true
+        else
+            log_message "${GREEN}✅ Storage capacity meets minimum requirement (${MIN_STORAGE_GB}GB)${NC}"
+        fi
+
+        # Check disk pressure
+        if [ "$used_pct" -ge 85 ]; then
+            log_message "${RED}❌ Warning: Close to disk pressure!${NC}"
+            TESTS_FAILED=true
+        else
+            log_message "${GREEN}✅ Disk usage is OK${NC}"
+        fi
+    done <<< "$gpu_nodes"
+
+    if [ "$TESTS_FAILED" = true ]; then
+        return 1
+    fi
+    return 0
+}
+
 # Function to run storage tests
 run_storage_tests() {
     log_message "${YELLOW}Testing storage functionality...${NC}"
     local TESTS_FAILED=false
+
+    # First check GPU node storage
+    if ! check_gpu_node_storage; then
+        log_message "${RED}❌ GPU node storage check failed${NC}"
+        TESTS_FAILED=true
+    fi
 
     # Get storage class
     if [ -n "$STORAGE_CLASS" ]; then
