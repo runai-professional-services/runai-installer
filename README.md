@@ -35,14 +35,14 @@ The following fields are always required:
 
 ### Basic Installation Example
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 2.20.22
+one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --repo-secret ./license.yaml
 ```
 
 ### Installation with Internal DNS
 ```sh
 # Note: --internal-dns requires --ip
 one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
-  --internal-dns --ip 172.21.140.20
+  --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
 
 ### Installation with Custom Certificates
