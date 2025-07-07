@@ -156,10 +156,12 @@ run_diagnostics_check() {
         return 1
     fi
 
-    # Parse and display results
+    # Parse and display results in a clean format
     echo -e "\n${YELLOW}Diagnostic Results:${NC}"
-    echo -e "----------------------------------------"
-
+    
+    # Track current server for grouping
+    CURRENT_SERVER=""
+    
     # Process the results file and format output
     while IFS= read -r line; do
         # Remove ANSI color codes and format
@@ -173,13 +175,38 @@ run_diagnostics_check() {
 
             # Skip empty or header lines
             if [ -n "$TEST_NAME" ] && [ "$TEST_NAME" != "TEST NAME" ]; then
-                # Format output
+                # Format test name
                 TEST_NAME=$(echo "$TEST_NAME" | xargs)
+                
+                # Check if this is a new server
+                if [[ "$TEST_NAME" =~ ^Node.* ]]; then
+                    # Add blank line for new servers
+                    if [ -n "$CURRENT_SERVER" ]; then
+                        echo ""
+                    fi
+                    CURRENT_SERVER="$TEST_NAME"
+                    echo -e "${YELLOW}$TEST_NAME${NC}"
+                fi
+                
+                # Format status (plain text)
                 if [ "$RESULT" = "PASS" ]; then
-                    echo -e "${TEST_NAME}: ${GREEN}✓ PASS${NC}"
+                    STATUS="PASS"
                 else
-                    echo -e "${TEST_NAME}: ${RED}✗ FAIL${NC}"
-                    echo -e "  └─ ${YELLOW}$MESSAGE${NC}"
+                    STATUS="FAIL"
+                fi
+                
+                # Print result
+                if [ "$RESULT" = "PASS" ]; then
+                    echo -e "  ${GREEN}✓ $TEST_NAME: $STATUS${NC}"
+                else
+                    echo -e "  ${RED}✗ $TEST_NAME: $STATUS${NC}"
+                    if [ -n "$MESSAGE" ]; then
+                        # Clean up the error message - remove table formatting and extra characters
+                        CLEAN_MESSAGE=$(echo "$MESSAGE" | sed 's/|//g' | sed 's/+-*//g' | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')
+                        if [ -n "$CLEAN_MESSAGE" ]; then
+                            echo -e "    ${YELLOW}Error: $CLEAN_MESSAGE${NC}"
+                        fi
+                    fi
                 fi
             fi
         fi
