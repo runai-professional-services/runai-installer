@@ -907,6 +907,59 @@ EOF
     return 0
 }
 
+# Function to perform namespace cleanup in background
+cleanup_namespace() {
+    local ns="$1"
+    local log_file="$2"
+
+    echo "Starting cleanup for namespace: $ns" >> "$log_file"
+
+    # Issue namespace deletion
+    echo "Deleting namespace $ns" >> "$log_file"
+    kubectl delete namespace "$ns" --force --grace-period=0 &>> "$log_file" || true
+
+    # Use your exact approach immediately after deletion
+    echo "Using direct API cleanup for namespace $ns" >> "$log_file"
+    
+    # Your exact method:
+    # kubectl proxy &
+    # kubectl get namespace $NAMESPACE -o json |jq '.spec = {"finalizers":[]}' > temp.json
+    # curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json 127.0.0.1:8001/api/v1/namespaces/$NAMESPACE/finalize
+    
+    kubectl proxy --port=8001 &>> "$log_file" &
+    local proxy_pid=$!
+    sleep 2
+    
+    kubectl get namespace "$ns" -o json | jq '.spec = {"finalizers":[]}' > temp.json 2>> "$log_file"
+    echo "Created temp.json for API cleanup" >> "$log_file"
+    
+    curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" &>> "$log_file"
+    echo "API cleanup completed for namespace $ns" >> "$log_file"
+    
+    # Wait for deletion
+    for j in {1..30}; do
+        if ! kubectl get namespace "$ns" &>> "$log_file"; then
+            echo "Namespace $ns deleted successfully via API cleanup" >> "$log_file"
+            break
+        fi
+        sleep 1
+    done
+
+    # Cleanup temp file and proxy
+    rm -f temp.json
+    if [ -n "$proxy_pid" ]; then
+        kill $proxy_pid 2>> "$log_file" || true
+    fi
+
+    # Final status check
+    if kubectl get namespace "$ns" &>> "$log_file"; then
+        echo "WARNING: Namespace $ns is still stuck in Terminating state" >> "$log_file"
+        echo "Manual cleanup may be required for namespace $ns" >> "$log_file"
+    else
+        echo "Namespace $ns cleanup completed successfully" >> "$log_file"
+    fi
+}
+
 # Cleanup function
 cleanup() {
     local exit_code=$?
@@ -916,20 +969,35 @@ cleanup() {
         echo -e "\n${YELLOW}Running cleanup...${NC}"
         
         if [ -n "$TEST_NS" ]; then
-            echo -e "${YELLOW}Deleting namespace $TEST_NS...${NC}"
-            kubectl delete namespace "$TEST_NS" --timeout=60s &>/dev/null || true
+            echo -e "${YELLOW}Starting background cleanup of namespace $TEST_NS...${NC}"
             
-            for i in {1..30}; do
-                if ! kubectl get namespace "$TEST_NS" &>/dev/null; then
-                    echo -e "${GREEN}✅ Namespace $TEST_NS deleted successfully${NC}"
-                    break
-                fi
-                sleep 1
-            done
+            # Run cleanup with background deletion and API cleanup
+            echo -e "${YELLOW}Cleaning up namespace $TEST_NS...${NC}"
             
-            if kubectl get namespace "$TEST_NS" &>/dev/null; then
-                echo -e "${YELLOW}⚠️ Forcing namespace deletion...${NC}"
-                kubectl delete namespace "$TEST_NS" --force --grace-period=0 &>/dev/null || true
+            # Delete namespace with --force in background
+            kubectl delete namespace "$TEST_NS" --force &>/dev/null &
+            
+            # Immediately run your exact API cleanup method
+            echo -e "${YELLOW}Using direct API cleanup for namespace $TEST_NS${NC}"
+            
+            # Your exact method:
+            # kubectl proxy &
+            # kubectl get namespace $NAMESPACE -o json |jq '.spec = {"finalizers":[]}' > temp.json
+            # curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json 127.0.0.1:8001/api/v1/namespaces/$NAMESPACE/finalize
+            
+            kubectl proxy --port=8001 &
+            PROXY_PID=$!
+            sleep 2
+            
+            kubectl get namespace "$TEST_NS" -o json | jq '.spec = {"finalizers":[]}' > temp.json
+            
+            curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json "127.0.0.1:8001/api/v1/namespaces/$TEST_NS/finalize" &>/dev/null
+            echo -e "${GREEN}✅ API cleanup completed for namespace $TEST_NS${NC}"
+            
+            # Cleanup temp file and proxy
+            rm -f temp.json
+            if [ -n "$PROXY_PID" ]; then
+                kill $PROXY_PID 2>/dev/null || true
             fi
         fi
         
