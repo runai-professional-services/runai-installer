@@ -148,7 +148,7 @@ if [[ "$response" =~ ^[Yy]$ ]]; then
         echo -e "${GREEN}✅ CRD cleanup completed${NC}"
     }
 
-    # Function to force delete namespace
+    # Function to force delete namespace using direct API method
     force_delete_namespace() {
         local namespace=$1
         
@@ -159,17 +159,63 @@ if [[ "$response" =~ ^[Yy]$ ]]; then
             return 0
         fi
         
-        # Remove finalizers from the namespace
-        echo -e "${BLUE}Removing finalizers from namespace $namespace...${NC}"
-        kubectl patch namespace $namespace -p '{"metadata":{"finalizers":[]}}' --type=merge &>/dev/null
+        # First try normal deletion (non-blocking)
+        echo -e "${BLUE}Attempting normal deletion of namespace $namespace...${NC}"
+        kubectl delete namespace $namespace --force --grace-period=0 &
+        local delete_pid=$!
         
-        # Force delete the namespace
-        if ! kubectl delete namespace $namespace --force --grace-period=0 &>/dev/null; then
-            echo -e "${RED}❌ Failed to delete namespace $namespace${NC}"
-            return 1
+        # Wait up to 10 seconds for normal deletion
+        for i in {1..10}; do
+            if ! kill -0 $delete_pid 2>/dev/null; then
+                # Process finished, check if namespace is gone
+                if ! kubectl get namespace $namespace &>/dev/null; then
+                    echo -e "${GREEN}✅ Namespace $namespace deleted successfully${NC}"
+                    return 0
+                fi
+                break
+            fi
+            sleep 1
+        done
+        
+        # Kill the deletion process if it's still running
+        if kill -0 $delete_pid 2>/dev/null; then
+            kill $delete_pid 2>/dev/null || true
         fi
-        
-        echo -e "${GREEN}✅ Namespace $namespace deleted${NC}"
+        if kubectl get namespace $namespace &>/dev/null; then
+            echo -e "${YELLOW}Namespace $namespace is stuck, using direct API cleanup...${NC}"
+            
+            # Use direct API method to remove finalizers
+            kubectl proxy --port=8001 &
+            local proxy_pid=$!
+            sleep 2
+            
+            # Create the JSON payload to remove finalizers
+            kubectl get namespace $namespace -o json | jq '.spec = {"finalizers":[]}' > temp.json
+            
+            # Call the API to finalize the namespace
+            curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json "127.0.0.1:8001/api/v1/namespaces/$namespace/finalize" &>/dev/null
+            
+            # Cleanup temp file and proxy
+            rm -f temp.json
+            if [ -n "$proxy_pid" ]; then
+                kill $proxy_pid 2>/dev/null || true
+            fi
+            
+            # Wait for deletion to complete
+            for i in {1..30}; do
+                if ! kubectl get namespace $namespace &>/dev/null; then
+                    echo -e "${GREEN}✅ Namespace $namespace deleted successfully via API cleanup${NC}"
+                    return 0
+                fi
+                sleep 1
+            done
+            
+            echo -e "${RED}❌ Failed to delete namespace $namespace even with API cleanup${NC}"
+            return 1
+        else
+            echo -e "${GREEN}✅ Namespace $namespace deleted successfully${NC}"
+            return 0
+        fi
     }
 
     # Main cleanup process
