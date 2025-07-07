@@ -41,20 +41,20 @@ one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --repo-se
 ### Installation with Internal DNS
 ```sh
 # Note: --internal-dns requires --ip
-one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
+one-click-installer.sh --dns runai.example.com --runai-version 	2.21.37 \
   --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
 
 ### Installation with Custom Certificates
 ```sh
 # Note: --cert requires --key
-one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
+one-click-installer.sh --dns runai.example.com --runai-version 	2.21.37 \
   --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret ./license.yaml
 ```
 
 ### Full Installation with All Components
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
+one-click-installer.sh --dns runai.example.com --runai-version 	2.21.37 \
   --nginx --prometheus --gpu-operator --knative \
   --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
@@ -63,7 +63,7 @@ one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 \
 ```sh
 # Format: <name>.<ip-address>.sslip.io
 # Example using IP 192.168.0.200:
-one-click-installer.sh --dns 192.168.0.200.sslip.io --runai-version 2.20.22 \
+one-click-installer.sh --dns 192.168.0.200.sslip.io --runai-versio 	2.21.37 \
   --nginx --prometheus --gpu-operator --knative --BCM \
   --ip 192.168.0.200 --repo-secret ./license.yaml 
 ```
