@@ -18,6 +18,7 @@ show_usage() {
     echo -e "  --storage        Run storage tests only"
     echo -e "  --class NAME     Specify storage class (optional)"
     echo -e "  --hardware       Check hardware requirements only"
+    echo -e "  --disk           Check disk/ephemeral storage only"
     echo -e "  --diag          Run preinstall diagnostics"
     echo -e "  --diag-dns NAME  DNS name for diagnostics"
     echo -e "  --silent        Suppress output messages"
@@ -27,6 +28,7 @@ show_usage() {
     echo -e "  $0 --storage"
     echo -e "  $0 --storage --class my-storage-class"
     echo -e "  $0 --hardware"
+    echo -e "  $0 --disk"
     echo -e "  $0 --diag"
     echo -e "  $0 --diag --diag-dns example.com"
     exit 1
@@ -364,6 +366,42 @@ check_hardware_requirements() {
         ((NODE_COUNT++))
         echo -e "${YELLOW}Checking node: ${GREEN}$node${NC}"
 
+        # Get node roles
+        local node_roles=""
+        local has_master=false
+        local has_worker=false
+        
+        # Check for master role
+        if kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null | grep -q "true"; then
+            has_master=true
+            node_roles="master"
+        fi
+        
+        # Check for worker role
+        if kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/worker}' 2>/dev/null | grep -q "true"; then
+            has_worker=true
+            if [ "$has_master" = true ]; then
+                node_roles="worker+master"
+            else
+                node_roles="worker"
+            fi
+        elif [ "$has_master" = false ]; then
+            # If no explicit roles found, assume worker
+            has_worker=true
+            node_roles="worker"
+        fi
+        
+        # If we still don't have roles, check for legacy master label
+        if [ -z "$node_roles" ]; then
+            if kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/master}' 2>/dev/null | grep -q "true"; then
+                has_master=true
+                node_roles="master"
+            fi
+        fi
+
+        # Display node role
+        echo -e "└─ Role: ${YELLOW}$node_roles${NC}"
+
         # Get OS information
         OS_INFO=$(kubectl get nodes "$node" -o wide --no-headers | awk '{for(i=8;i<=NF-1;i++) printf "%s ", $i; print ""}' | sed 's/ $//' | sed 's/containerd.*$//')
         echo -e "└─ OS: ${YELLOW}$OS_INFO${NC}"
@@ -406,6 +444,11 @@ check_hardware_requirements() {
         # Show individual node resources
         echo -e "└─ CPU Cores: ${YELLOW}$CPU_CORES${NC}"
         echo -e "└─ RAM: ${YELLOW}${RAM_GB}GB${NC}"
+        
+        # Check storage for this node
+        if ! check_node_storage "$node"; then
+            echo -e "  └─ ${RED}❌ Storage check failed for this node${NC}"
+        fi
         echo ""
     done <<< "$NODES"
 
@@ -420,6 +463,7 @@ check_hardware_requirements() {
     else
         echo -e "GPU Nodes: ${RED}None detected${NC}"
     fi
+    echo -e "Minimum Disk Space: ${YELLOW}110GB${NC} per node"
     echo -e "----------------------------------------"
 
     # Check total requirements
@@ -446,36 +490,25 @@ check_hardware_requirements() {
         if [ -n "$MISSING_COMPONENTS" ]; then
             echo -e "${YELLOW}⚠️ Missing required components: $MISSING_COMPONENTS${NC}"
         fi
+        echo -e "${YELLOW}⚠️ Note: Storage requirements are checked separately for each node${NC}"
         return 0
     else
         echo -e "${RED}❌ Cluster does not meet minimum requirements${NC}"
         if [ -n "$MISSING_COMPONENTS" ]; then
             echo -e "${RED}❌ Missing required components: $MISSING_COMPONENTS${NC}"
         fi
+        echo -e "${YELLOW}⚠️ Note: Check individual node storage requirements above${NC}"
         return 1
     fi
 }
 
-# Function to check GPU node storage
-check_gpu_node_storage() {
-    log_message "${YELLOW}Checking ephemeral storage on GPU nodes...${NC}"
-    local MIN_STORAGE_GB=150
+# Function to check node disk/ephemeral storage
+check_node_storage() {
+    local node="$1"
+    local node_type="$2"
+    local MIN_STORAGE_GB=110  # Minimum for all nodes
+    local MIN_GPU_STORAGE_GB=150  # Higher minimum for GPU nodes
     local TESTS_FAILED=false
-
-    # Get GPU nodes
-    local gpu_nodes
-    gpu_nodes=$(kubectl get nodes -o json | jq -r '.items[] | select(.status.allocatable["nvidia.com/gpu"]) | .metadata.name' 2>/dev/null)
-
-    # Check if jq is available
-    if ! command -v jq &> /dev/null; then
-        log_message "${RED}❌ 'jq' is required but not installed. Please install it first.${NC}"
-        return 1
-    fi
-
-    if [ -z "$gpu_nodes" ]; then
-        log_message "${YELLOW}⚠️ No nodes with GPU found.${NC}"
-        return 0
-    fi
 
     # Function to convert to bytes
     to_bytes() {
@@ -491,41 +524,112 @@ check_gpu_node_storage() {
         fi
     }
 
-    # Iterate through GPU nodes
+    # Function to convert bytes to GB
+    to_gb() { 
+        echo "$(( $1 / 1024 / 1024 / 1024 ))"
+    }
+
+    # Check if this is a GPU node
+    local gpu_count
+    gpu_count=$(kubectl get node "$node" -o jsonpath='{.status.capacity.nvidia\.com/gpu}' 2>/dev/null)
+    local is_gpu_node=false
+    if [ -n "$gpu_count" ] && [ "$gpu_count" != "0" ]; then
+        is_gpu_node=true
+    fi
+
+    # Get ephemeral storage capacity and allocatable
+    local capacity
+    local allocatable
+    capacity=$(kubectl get node "$node" -o jsonpath="{.status.capacity['ephemeral-storage']}" 2>/dev/null)
+    allocatable=$(kubectl get node "$node" -o jsonpath="{.status.allocatable['ephemeral-storage']}" 2>/dev/null)
+
+    if [ -z "$capacity" ] || [ -z "$allocatable" ]; then
+        echo "└─ Storage: warning Could not retrieve storage information"
+        return 1
+    fi
+
+    # Convert to bytes and calculate usage
+    local cap_bytes=$(to_bytes "$capacity")
+    local alloc_bytes=$(to_bytes "$allocatable")
+    local used_bytes=$((cap_bytes - alloc_bytes))
+    local used_pct=$((used_bytes * 100 / cap_bytes))
+    local cap_gb=$(to_gb $cap_bytes)
+    local alloc_gb=$(to_gb $alloc_bytes)
+    local used_gb=$(to_gb $used_bytes)
+
+    # Determine minimum requirement based on node type
+    local min_required_gb=$MIN_STORAGE_GB
+    if [ "$is_gpu_node" = true ]; then
+        min_required_gb=$MIN_GPU_STORAGE_GB
+    fi
+
+    # Warnings
+    if [ "$cap_bytes" -lt $((min_required_gb * 1024 * 1024 * 1024)) ]; then
+        echo "└─ Storage: warning Insufficient storage: ${cap_gb}GB < ${min_required_gb}GB minimum"
+        TESTS_FAILED=true
+    fi
+    if [ "$used_pct" -ge 85 ]; then
+        echo "└─ Storage: warning High disk usage (${used_pct}%) - close to pressure!"
+        TESTS_FAILED=true
+    elif [ "$used_pct" -ge 75 ]; then
+        echo "└─ Storage: warning Moderate disk usage (${used_pct}%)"
+    fi
+    local disk_pressure
+    disk_pressure=$(kubectl get node "$node" -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}' 2>/dev/null)
+    if [ "$disk_pressure" = "True" ]; then
+        echo "└─ Storage: warning Node is under disk pressure - pods may be evicted"
+        TESTS_FAILED=true
+    fi
+
+    return $([ "$TESTS_FAILED" = true ] && echo 1 || echo 0)
+}
+
+# Function to check all nodes storage (replaces the old GPU-only function)
+check_all_nodes_storage() {
+    log_message "${YELLOW}Checking ephemeral storage on all nodes...${NC}"
+    local TESTS_FAILED=false
+    local total_nodes=0
+    local nodes_with_issues=0
+
+    # Get all nodes
+    local all_nodes
+    all_nodes=$(kubectl get nodes --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null)
+
+    if [ -z "$all_nodes" ]; then
+        log_message "${RED}❌ No nodes found in the cluster${NC}"
+        return 1
+    fi
+
+    # Check each node
     while read -r node; do
-        log_message "${YELLOW}-----------------------------------------${NC}"
-        log_message "${YELLOW}🎯 GPU Node: $node${NC}"
-
-        capacity=$(kubectl get node "$node" -o jsonpath="{.status.capacity['ephemeral-storage']}")
-        allocatable=$(kubectl get node "$node" -o jsonpath="{.status.allocatable['ephemeral-storage']}")
-
-        cap_bytes=$(to_bytes "$capacity")
-        alloc_bytes=$(to_bytes "$allocatable")
-        used_bytes=$((cap_bytes - alloc_bytes))
-        used_pct=$((used_bytes * 100 / cap_bytes))
-
-        to_gib() { echo "$(( $1 / 1024 / 1024 / 1024 ))Gi"; }
-
-        log_message "${YELLOW}📦 Capacity:    $(to_gib $cap_bytes)${NC}"
-        log_message "${YELLOW}📉 Allocatable: $(to_gib $alloc_bytes)${NC}"
-        log_message "${YELLOW}💾 Used:        $(to_gib $used_bytes) (${used_pct}%)${NC}"
-
-        # Check if capacity meets minimum requirement
-        if [ $((cap_bytes / 1024 / 1024 / 1024)) -lt $MIN_STORAGE_GB ]; then
-            log_message "${RED}❌ Insufficient storage: Less than ${MIN_STORAGE_GB}GB available${NC}"
+        ((total_nodes++))
+        echo -e "${YELLOW}-----------------------------------------${NC}"
+        echo -e "${YELLOW}🎯 Node: ${GREEN}$node${NC}"
+        
+        if ! check_node_storage "$node"; then
+            ((nodes_with_issues++))
             TESTS_FAILED=true
-        else
-            log_message "${GREEN}✅ Storage capacity meets minimum requirement (${MIN_STORAGE_GB}GB)${NC}"
         fi
+        echo ""
+    done <<< "$all_nodes"
 
-        # Check disk pressure
-        if [ "$used_pct" -ge 85 ]; then
-            log_message "${RED}❌ Warning: Close to disk pressure!${NC}"
-            TESTS_FAILED=true
-        else
-            log_message "${GREEN}✅ Disk usage is OK${NC}"
-        fi
-    done <<< "$gpu_nodes"
+    # Summary
+    echo -e "${YELLOW}Storage Check Summary:${NC}"
+    echo -e "----------------------------------------"
+    echo -e "Total Nodes Checked: ${YELLOW}$total_nodes${NC}"
+    echo -e "Minimum Required: ${YELLOW}110GB${NC} per node (150GB for GPU nodes)"
+    if [ "$nodes_with_issues" -gt 0 ]; then
+        echo -e "Nodes with Issues: ${RED}$nodes_with_issues${NC}"
+        echo -e "${RED}❌ Some nodes have storage issues${NC}"
+        echo -e "${YELLOW}⚠️ Recommendations:${NC}"
+        echo -e "   - Consider adding more storage to nodes with insufficient capacity"
+        echo -e "   - Clean up unused images, logs, and temporary files"
+        echo -e "   - Monitor disk usage regularly to prevent pressure conditions"
+    else
+        echo -e "Nodes with Issues: ${GREEN}0${NC}"
+        echo -e "${GREEN}✅ All nodes have adequate storage${NC}"
+    fi
+    echo -e "----------------------------------------"
 
     if [ "$TESTS_FAILED" = true ]; then
         return 1
@@ -538,9 +642,9 @@ run_storage_tests() {
     log_message "${YELLOW}Testing storage functionality...${NC}"
     local TESTS_FAILED=false
 
-    # First check GPU node storage
-    if ! check_gpu_node_storage; then
-        log_message "${RED}❌ GPU node storage check failed${NC}"
+    # First check all nodes storage
+    if ! check_all_nodes_storage; then
+        log_message "${RED}❌ Node storage check failed${NC}"
         TESTS_FAILED=true
     fi
 
@@ -1038,6 +1142,7 @@ cleanup() {
 
 # Initialize variables
 HARDWARE_CHECK=false
+DISK_CHECK=false
 DIAG=false
 DIAG_DNS=""
 SILENT_MODE=false
@@ -1046,6 +1151,7 @@ VALID_ARGS=false
 # Initialize test result variables
 STORAGE_TEST_RESULT=0
 HARDWARE_TEST_RESULT=0
+DISK_TEST_RESULT=0
 DIAG_TEST_RESULT=0
 TLS_TEST_RESULT=0
 TLS_SECRET_CREATED=false
@@ -1110,6 +1216,11 @@ while [[ $# -gt 0 ]]; do
             VALID_ARGS=true
             shift
             ;;
+        --disk)
+            DISK_CHECK=true
+            VALID_ARGS=true
+            shift
+            ;;
         --diag)
             DIAG=true
             VALID_ARGS=true
@@ -1142,6 +1253,7 @@ if [ "$VALID_ARGS" = false ]; then
     echo -e "  - Certificate, key, and DNS parameters for a full test"
     echo -e "  - The --storage flag for storage-only tests"
     echo -e "  - The --hardware flag for hardware check"
+    echo -e "  - The --disk flag for disk/ephemeral storage check"
     echo -e "  - The --diag flag for preinstall diagnostics"
     echo -e "\n"
     show_usage
@@ -1155,20 +1267,20 @@ if [ "$DIAG" = true ]; then
         exit 1
     fi
     # Only exit if this is the only check requested
-    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
         echo -e "\n${GREEN}✅ Diagnostics check completed successfully!${NC}"
         exit 0
     fi
 fi
 
 # Skip remaining validation if only running diagnostics
-if [ "$DIAG" = true ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+if [ "$DIAG" = true ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
     exit 0
 fi
 
 # Validate required parameters
-if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
-    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage or --hardware${NC}"
+if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
+    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage, --hardware, or --disk${NC}"
     show_usage
 fi
 
@@ -1192,10 +1304,16 @@ if [ "$HARDWARE_CHECK" = "true" ]; then
         exit 1
     fi
     # Only exit if this is the only check requested
-    if [ "$STORAGE_ONLY" != "true" ] && [ -z "$CERT_FILE" ]; then
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
         echo -e "\n${GREEN}✅ Hardware check completed successfully!${NC}"
         exit 0
     fi
+fi
+
+# Run disk check if requested
+if [ "$DISK_CHECK" = "true" ]; then
+    check_all_nodes_storage
+    DISK_TEST_RESULT=$?
 fi
 
 # Main execution flow
