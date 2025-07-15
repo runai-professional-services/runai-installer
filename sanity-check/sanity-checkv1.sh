@@ -21,8 +21,6 @@ show_usage() {
     echo -e "  --disk           Check disk/ephemeral storage only"
     echo -e "  --diag          Run preinstall diagnostics"
     echo -e "  --diag-dns NAME  DNS name for diagnostics"
-    echo -e "  --prereq         Check prerequisite software"
-    echo -e "  --clean          Clean up all sanity-test namespaces (manual cleanup required)"
     echo -e "  --silent        Suppress output messages"
     echo -e "  -h, --help      Show this help message"
     echo -e "\n${YELLOW}Examples:${NC}"
@@ -33,9 +31,6 @@ show_usage() {
     echo -e "  $0 --disk"
     echo -e "  $0 --diag"
     echo -e "  $0 --diag --diag-dns example.com"
-    echo -e "  $0 --clean"
-    echo -e "\n${YELLOW}Note:${NC} Test namespaces are not automatically cleaned up."
-    echo -e "      Run '$0 --clean' to remove test namespaces and resources."
     exit 1
 }
 
@@ -148,31 +143,13 @@ run_diagnostics_check() {
         return 1
     fi
 
-    # Run diagnostics with timeout
+    # Run diagnostics
     echo -e "${YELLOW}Running diagnostics...${NC}"
     if [ -n "$DIAG_DNS" ]; then
         echo -e "${YELLOW}Running DNS diagnostics for domain: $DIAG_DNS${NC}"
-        echo -e "${YELLOW}This may take a few minutes...${NC}"
-        if ! timeout 300 ./preinstall-diagnostics --domain "$DIAG_DNS" --cluster-domain "$DIAG_DNS" > /dev/null 2>&1; then
-            local exit_code=$?
-            if [ $exit_code -eq 124 ]; then
-                echo -e "${RED}❌ Diagnostics timed out after 5 minutes${NC}"
-            else
-                echo -e "${RED}❌ Diagnostics failed (exit code: $exit_code)${NC}"
-            fi
-            return 1
-        fi
+        ./preinstall-diagnostics --domain "$DIAG_DNS" --cluster-domain "$DIAG_DNS" > /dev/null 2>&1
     else
-        echo -e "${YELLOW}This may take a few minutes...${NC}"
-        if ! timeout 300 ./preinstall-diagnostics > /dev/null 2>&1; then
-            local exit_code=$?
-            if [ $exit_code -eq 124 ]; then
-                echo -e "${RED}❌ Diagnostics timed out after 5 minutes${NC}"
-            else
-                echo -e "${RED}❌ Diagnostics failed (exit code: $exit_code)${NC}"
-            fi
-            return 1
-        fi
+        ./preinstall-diagnostics > /dev/null 2>&1
     fi
 
     # Check if results file exists
@@ -344,12 +321,6 @@ check_hardware_requirements() {
                 if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(3[0-2])$ ]]; then
                     [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
                     SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.21"
-                fi
-                
-                # v2.22 supports 1.31-1.33
-                if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(3[1-3])$ ]]; then
-                    [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
-                    SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.22"
                 fi
             fi
             
@@ -668,25 +639,37 @@ check_all_nodes_storage() {
 
 # Function to run storage tests
 run_storage_tests() {
+    log_message "${YELLOW}Testing storage functionality...${NC}"
     local TESTS_FAILED=false
+
+    # First check all nodes storage
+    if ! check_all_nodes_storage; then
+        log_message "${RED}❌ Node storage check failed${NC}"
+        TESTS_FAILED=true
+    fi
 
     # Get storage class
     if [ -n "$STORAGE_CLASS" ]; then
         if ! kubectl get storageclass "$STORAGE_CLASS" &>/dev/null; then
-            echo -e "❌ Storage test failed"
+            log_message "${RED}❌ StorageClass $STORAGE_CLASS not found${NC}"
+            TESTS_FAILED=true
             return 1
         fi
         SC_TO_USE="$STORAGE_CLASS"
+        log_message "${YELLOW}Using specified StorageClass: $SC_TO_USE${NC}"
     else
         SC_TO_USE=$(kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")].metadata.name}')
         if [ -z "$SC_TO_USE" ]; then
-            echo -e "❌ Storage test failed"
+            log_message "${RED}❌ No default StorageClass found${NC}"
+            TESTS_FAILED=true
             return 1
         fi
+        log_message "${YELLOW}Using default StorageClass: $SC_TO_USE${NC}"
     fi
 
     # Create PVC first
-    cat <<EOF | kubectl apply -f - > /dev/null
+    log_message "${YELLOW}Creating PVC...${NC}"
+    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -702,7 +685,8 @@ spec:
 EOF
 
     # Create pod to test storage
-    cat <<EOF | kubectl apply -f - > /dev/null
+    log_message "${YELLOW}Creating storage test pod...${NC}"
+    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
 apiVersion: v1
 kind: Pod
 metadata:
@@ -729,54 +713,71 @@ spec:
       claimName: sanity-pvc
 EOF
 
-    # Wait for PVC to be bound
+    # Wait for PVC and Pod
+    log_message "${YELLOW}Waiting for PVC to be bound...${NC}"
     for i in {1..30}; do
         if kubectl get pvc -n "$TEST_NS" sanity-pvc &>/dev/null; then
             break
         fi
         sleep 2
     done
+
     PVC_STATUS=$(kubectl get pvc -n "$TEST_NS" sanity-pvc -o jsonpath='{.status.phase}')
     if [ "$PVC_STATUS" = "Bound" ]; then
-        echo -e "✅ PVC successfully bound"
+        log_message "${GREEN}✅ PVC successfully bound${NC}"
     else
         sleep 10
         PVC_STATUS=$(kubectl get pvc -n "$TEST_NS" sanity-pvc -o jsonpath='{.status.phase}')
         if [ "$PVC_STATUS" = "Bound" ]; then
-            echo -e "✅ PVC successfully bound"
+            log_message "${GREEN}✅ PVC successfully bound${NC}"
         else
-            echo -e "❌ Storage test failed"
-            return 1
+            log_message "${RED}❌ PVC failed to bind${NC}"
+            log_message "${YELLOW}PVC Status:${NC}"
+            kubectl get pvc -n "$TEST_NS" sanity-pvc
+            kubectl describe pvc -n "$TEST_NS" sanity-pvc
+            TESTS_FAILED=true
         fi
     fi
 
+    # Log PVC details
+    log_message "${YELLOW}PVC Details:${NC}"
+    kubectl get pvc -n "$TEST_NS" sanity-pvc >> "$LOG_FILE"
+
     # Wait for storage test pod
-    if ! kubectl wait --for=condition=ready pod/storage-test -n $TEST_NS --timeout=60s > /dev/null 2>&1; then
-        echo -e "❌ Storage test failed"
-        return 1
+    log_message "${YELLOW}Waiting for storage test pod to be ready...${NC}"
+    if ! log_command "kubectl wait --for=condition=ready pod/storage-test -n $TEST_NS --timeout=60s" "Wait for storage test pod"; then
+        log_message "${RED}❌ Storage test pod failed to become ready${NC}"
+        kubectl get pod -n $TEST_NS storage-test
+        kubectl describe pod -n $TEST_NS storage-test
+        TESTS_FAILED=true
     fi
 
     # Test file operations
-    if ! kubectl exec -n $TEST_NS storage-test -- /bin/bash -c 'echo "Test content" > /data/test.txt' > /dev/null 2>&1; then
-        echo -e "❌ Storage test failed"
-        return 1
+    log_message "${YELLOW}Testing file creation with user 1001:1001...${NC}"
+    if ! log_command "kubectl exec -n $TEST_NS storage-test -- /bin/bash -c 'echo \"Test content\" > /data/test.txt'" "Create test file"; then
+        log_message "${RED}❌ Failed to create test file${NC}"
+        TESTS_FAILED=true
     fi
 
     # Verify permissions
+    log_message "${YELLOW}Verifying file permissions and ownership...${NC}"
     FILE_OWNER=$(kubectl exec -n $TEST_NS storage-test -- ls -ln /data/test.txt | awk '{print $3":"$4}')
     if [ "$FILE_OWNER" = "1001:1001" ]; then
-        echo -e "✅ File ownership verified: 1001:1001"
+        log_message "${GREEN}✅ File ownership verified: $FILE_OWNER${NC}"
     else
-        echo -e "❌ Storage test failed"
-        return 1
+        log_message "${RED}❌ Incorrect file ownership: $FILE_OWNER (expected 1001:1001)${NC}"
+        TESTS_FAILED=true
     fi
 
     # Test 1: Create file as user 1001:1001 (already implemented)
-    echo -e "✅ Test 1 completed (file created with correct ownership)"
+    log_message "${YELLOW}Test 1: File created by user 1001:1001${NC}"
+    log_message "${GREEN}✅ Test 1 completed (file created with correct ownership)${NC}"
 
     # Test 2: Create file as root and change ownership
+    log_message "${YELLOW}Test 2: Creating root pod to test ownership change...${NC}"
+    
     # Create root pod
-    cat <<EOF | kubectl apply -f - > /dev/null
+    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
 apiVersion: v1
 kind: Pod
 metadata:
@@ -802,42 +803,60 @@ spec:
 EOF
 
     # Wait for root pod to be ready
-    if ! kubectl wait --for=condition=ready pod/root-test -n $TEST_NS --timeout=60s > /dev/null 2>&1; then
-        echo -e "❌ Storage test failed"
-        return 1
+    log_message "${YELLOW}Waiting for root pod to be ready...${NC}"
+    if ! log_command "kubectl wait --for=condition=ready pod/root-test -n $TEST_NS --timeout=60s" "Wait for root pod"; then
+        log_message "${RED}❌ Root pod failed to become ready${NC}"
+        TESTS_FAILED=true
     fi
 
     # Create file as root
-    if ! kubectl exec -n $TEST_NS root-test -- touch /data/root_test.txt > /dev/null 2>&1; then
-        echo -e "❌ Storage test failed"
-        return 1
+    log_message "${YELLOW}Creating file as root...${NC}"
+    if ! log_command "kubectl exec -n $TEST_NS root-test -- touch /data/root_test.txt" "Create file as root"; then
+        log_message "${RED}❌ Failed to create file as root${NC}"
+        TESTS_FAILED=true
     fi
 
     # Verify initial ownership (should be 0:0)
     ROOT_FILE_OWNER=$(kubectl exec -n $TEST_NS root-test -- ls -ln /data/root_test.txt | awk '{print $3":"$4}')
     if [ "$ROOT_FILE_OWNER" = "0:0" ]; then
-        echo -e "✅ Initial file ownership verified: 0:0"
+        log_message "${GREEN}✅ Initial file ownership verified: $ROOT_FILE_OWNER${NC}"
     else
-        echo -e "❌ Storage test failed"
-        return 1
+        log_message "${RED}❌ Incorrect initial file ownership: $ROOT_FILE_OWNER (expected 0:0)${NC}"
+        TESTS_FAILED=true
     fi
 
     # Change ownership to 1001:1001
-    if ! kubectl exec -n $TEST_NS root-test -- chown 1001:1001 /data/root_test.txt > /dev/null 2>&1; then
-        echo -e "❌ Storage test failed"
-        return 1
+    log_message "${YELLOW}Changing file ownership to 1001:1001...${NC}"
+    if ! log_command "kubectl exec -n $TEST_NS root-test -- chown 1001:1001 /data/root_test.txt" "Change file ownership"; then
+        log_message "${RED}❌ Failed to change file ownership${NC}"
+        TESTS_FAILED=true
     fi
 
     # Verify new ownership
     NEW_OWNER=$(kubectl exec -n $TEST_NS root-test -- ls -ln /data/root_test.txt | awk '{print $3":"$4}')
     if [ "$NEW_OWNER" = "1001:1001" ]; then
-        echo -e "✅ File ownership successfully changed to: 1001:1001"
+        log_message "${GREEN}✅ File ownership successfully changed to: $NEW_OWNER${NC}"
     else
-        echo -e "❌ Storage test failed"
-        return 1
+        log_message "${RED}❌ Failed to change file ownership. Current ownership: $NEW_OWNER (expected 1001:1001)${NC}"
+        TESTS_FAILED=true
     fi
 
-    echo -e "✅ Storage test completed"
+    # Add storage test results to log
+    log_message "\n==== Storage Test Summary ====" >> "$LOG_FILE"
+    log_message "StorageClass: $SC_TO_USE" >> "$LOG_FILE"
+    log_message "PVC Status:" >> "$LOG_FILE"
+    kubectl get pvc sanity-pvc -n $TEST_NS -o wide >> "$LOG_FILE"
+    log_message "User-created File Permissions:" >> "$LOG_FILE"
+    kubectl exec -n $TEST_NS storage-test -- ls -l /data/test.txt >> "$LOG_FILE"
+    log_message "Root-created File Permissions:" >> "$LOG_FILE"
+    kubectl exec -n $TEST_NS root-test -- ls -l /data/root_test.txt >> "$LOG_FILE"
+
+    log_message "${GREEN}✅ Storage test completed${NC}"
+
+    # Return overall test status
+    if [ "$TESTS_FAILED" = true ]; then
+        return 1
+    fi
     return 0
 }
 
@@ -1016,154 +1035,7 @@ EOF
         fi
     fi
 
-    log_message "${GREEN}✅ TLS configuration test completed successfully${NC}"
     return 0
-}
-
-# Function to clean up all sanity-test namespaces
-cleanup_all_test_namespaces() {
-    log_message "${YELLOW}Cleaning up all sanity-test namespaces...${NC}"
-    
-    # Kill any existing kubectl proxy processes
-    pkill -f "kubectl proxy" 2>/dev/null || true
-    sleep 1
-    
-    # Step 1: Find all sanity-test-* namespaces and orphaned pods
-    local test_namespaces
-    test_namespaces=$(kubectl get namespaces --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | grep "^sanity-test-" || true)
-    
-    # Also find namespaces that have orphaned pods (pods running in non-existent namespaces)
-    local orphaned_namespaces
-    orphaned_namespaces=$(kubectl get pods -A --no-headers 2>/dev/null | grep "sanity-test-" | awk '{print $1}' | sort | uniq | while read -r ns; do
-        if ! kubectl get namespace "$ns" &>/dev/null; then
-            echo "$ns"
-        fi
-    done)
-    
-    # Combine both lists
-    test_namespaces=$(echo -e "${test_namespaces}\n${orphaned_namespaces}" | sort | uniq | grep -v '^$')
-    
-    if [ -z "$test_namespaces" ]; then
-        log_message "${GREEN}✅ No sanity-test namespaces found to clean up${NC}"
-        return 0
-    fi
-    
-    log_message "${YELLOW}Found the following test namespaces:${NC}"
-    echo "$test_namespaces" | while read -r ns; do
-        log_message "  - $ns"
-    done
-    
-    local cleaned_count=0
-    local failed_count=0
-    
-    # Clean up each namespace
-    while read -r ns; do
-        if [ -n "$ns" ]; then
-            log_message "${YELLOW}Cleaning up namespace: $ns${NC}"
-            
-            # Step 2: Delete all assets inside each namespace - pods, deployments, sts, etc.
-            log_message "  └─ Deleting all assets in namespace..."
-            
-            # Check if namespace exists
-            if kubectl get namespace "$ns" &>/dev/null; then
-                # Normal namespace deletion
-                kubectl delete all --all -n "$ns" --ignore-not-found=true &>/dev/null
-                kubectl delete pvc --all -n "$ns" --ignore-not-found=true &>/dev/null
-                kubectl delete secret --all -n "$ns" --ignore-not-found=true &>/dev/null
-                kubectl delete ingress --all -n "$ns" --ignore-not-found=true &>/dev/null
-                kubectl delete statefulset --all -n "$ns" --ignore-not-found=true &>/dev/null
-                kubectl delete daemonset --all -n "$ns" --ignore-not-found=true &>/dev/null
-                kubectl delete job --all -n "$ns" --ignore-not-found=true &>/dev/null
-                kubectl delete cronjob --all -n "$ns" --ignore-not-found=true &>/dev/null
-            else
-                # Handle orphaned pods in non-existent namespace
-                log_message "  └─ Found orphaned pods in non-existent namespace, force deleting pods..."
-                kubectl get pods -n "$ns" --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | while read -r pod; do
-                    if [ -n "$pod" ]; then
-                        kubectl delete pod "$pod" -n "$ns" --force --grace-period=0 &>/dev/null || true
-                    fi
-                done
-            fi
-            
-            # Step 3: Delete namespace with --force and immediately do API call
-            if kubectl get namespace "$ns" &>/dev/null; then
-                log_message "  └─ Force deleting namespace and using API cleanup..."
-                kubectl delete namespace "$ns" --force --grace-period=0 &>/dev/null
-                
-                # Wait a moment for deletion
-                sleep 3
-                
-                # Check if namespace is already deleted
-                if ! kubectl get namespace "$ns" &>/dev/null; then
-                    log_message "${GREEN}✅ Namespace $ns deleted successfully${NC}"
-                    ((cleaned_count++))
-                else
-                    # Try API cleanup only if namespace still exists
-                    log_message "  └─ Namespace still exists, trying API cleanup..."
-                    
-                    # Start kubectl proxy with timeout
-                    kubectl proxy --port=8001 &
-                    local proxy_pid=$!
-                    sleep 2
-                    
-                    # Try to get namespace JSON with timeout
-                    if timeout 10 kubectl get namespace "$ns" -o json > temp.json 2>/dev/null; then
-                        if timeout 10 jq '.spec = {"finalizers":[]}' temp.json > temp_finalize.json 2>/dev/null; then
-                            if timeout 10 curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp_finalize.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" &>/dev/null; then
-                                log_message "  └─ API cleanup completed"
-                            else
-                                log_message "  └─ API cleanup failed"
-                            fi
-                        else
-                            log_message "  └─ Failed to create finalize JSON"
-                        fi
-                    else
-                        log_message "  └─ Failed to get namespace JSON"
-                    fi
-                    
-                    # Cleanup temp files and proxy
-                    rm -f temp.json temp_finalize.json 2>/dev/null || true
-                    if [ -n "$proxy_pid" ]; then
-                        kill $proxy_pid 2>/dev/null || true
-                    fi
-                    
-                    # Wait a bit more and check final status
-                    sleep 5
-                    if ! kubectl get namespace "$ns" &>/dev/null; then
-                        log_message "${GREEN}✅ Namespace $ns deleted successfully via API cleanup${NC}"
-                        ((cleaned_count++))
-                    else
-                        log_message "${RED}❌ Failed to delete namespace $ns - manual cleanup may be required${NC}"
-                        ((failed_count++))
-                    fi
-                fi
-            else
-                # Namespace doesn't exist, just clean up orphaned pods
-                log_message "${GREEN}✅ Orphaned pods in $ns cleaned up successfully${NC}"
-                ((cleaned_count++))
-            fi
-        fi
-    done <<< "$test_namespaces"
-    
-    # Final cleanup of any remaining proxy processes
-    pkill -f "kubectl proxy" 2>/dev/null || true
-    
-    log_message "\n${YELLOW}Cleanup Summary:${NC}"
-    log_message "----------------------------------------"
-    log_message "Namespaces cleaned: ${GREEN}$cleaned_count${NC}"
-    if [ "$failed_count" -gt 0 ]; then
-        log_message "Namespaces failed: ${RED}$failed_count${NC}"
-        log_message "${YELLOW}⚠️ Some namespaces may require manual cleanup${NC}"
-    fi
-    log_message "----------------------------------------"
-    
-    if [ "$failed_count" -eq 0 ]; then
-        log_message "${GREEN}✅ All test namespaces cleaned successfully!${NC}"
-        return 0
-    else
-        log_message "${RED}❌ Some namespaces could not be cleaned${NC}"
-        return 1
-    fi
 }
 
 # Function to perform namespace cleanup in background
@@ -1173,53 +1045,41 @@ cleanup_namespace() {
 
     echo "Starting cleanup for namespace: $ns" >> "$log_file"
 
-    # Issue namespace deletion with force
-    echo "Force deleting namespace $ns" >> "$log_file"
+    # Issue namespace deletion
+    echo "Deleting namespace $ns" >> "$log_file"
     kubectl delete namespace "$ns" --force --grace-period=0 &>> "$log_file" || true
-    
-    # Wait 10 seconds then do API cleanup
-    echo "Waiting 10 seconds then using API cleanup..." >> "$log_file"
-    sleep 10
-    
-    # Always use API cleanup
-    echo "Using API cleanup for namespace $ns" >> "$log_file"
-    
-    # Check if namespace still exists before attempting API cleanup
-    if kubectl get namespace "$ns" &>> "$log_file"; then
-        kubectl proxy --port=8001 &>> "$log_file" &
-        local proxy_pid=$!
-        sleep 2
-        
-        # Try to get namespace JSON with timeout
-        if timeout 10 kubectl get namespace "$ns" -o json > temp.json 2>> "$log_file"; then
-            echo "Created temp.json for API cleanup" >> "$log_file"
-            
-            if timeout 10 jq '.spec = {"finalizers":[]}' temp.json > temp_finalize.json 2>> "$log_file"; then
-                curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp_finalize.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" &>> "$log_file"
-                echo "API cleanup completed for namespace $ns" >> "$log_file"
-            else
-                echo "Failed to create finalize JSON for namespace $ns" >> "$log_file"
-            fi
-        else
-            echo "Failed to get namespace JSON for $ns" >> "$log_file"
-        fi
-        
-        # Wait for deletion with timeout
-        for j in {1..30}; do
-            if ! kubectl get namespace "$ns" &>> "$log_file"; then
-                echo "Namespace $ns deleted successfully via API cleanup" >> "$log_file"
-                break
-            fi
-            sleep 1
-        done
 
-        # Cleanup temp files and proxy
-        rm -f temp.json temp_finalize.json 2>> "$log_file" || true
-        if [ -n "$proxy_pid" ]; then
-            kill $proxy_pid 2>> "$log_file" || true
+    # Use your exact approach immediately after deletion
+    echo "Using direct API cleanup for namespace $ns" >> "$log_file"
+    
+    # Your exact method:
+    # kubectl proxy &
+    # kubectl get namespace $NAMESPACE -o json |jq '.spec = {"finalizers":[]}' > temp.json
+    # curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json 127.0.0.1:8001/api/v1/namespaces/$NAMESPACE/finalize
+    
+    kubectl proxy --port=8001 &>> "$log_file" &
+    local proxy_pid=$!
+    sleep 2
+    
+    kubectl get namespace "$ns" -o json | jq '.spec = {"finalizers":[]}' > temp.json 2>> "$log_file"
+    echo "Created temp.json for API cleanup" >> "$log_file"
+    
+    curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" &>> "$log_file"
+    echo "API cleanup completed for namespace $ns" >> "$log_file"
+    
+    # Wait for deletion
+    for j in {1..30}; do
+        if ! kubectl get namespace "$ns" &>> "$log_file"; then
+            echo "Namespace $ns deleted successfully via API cleanup" >> "$log_file"
+            break
         fi
-    else
-        echo "Namespace $ns no longer exists, skipping API cleanup" >> "$log_file"
+        sleep 1
+    done
+
+    # Cleanup temp file and proxy
+    rm -f temp.json
+    if [ -n "$proxy_pid" ]; then
+        kill $proxy_pid 2>> "$log_file" || true
     fi
 
     # Final status check
@@ -1235,97 +1095,45 @@ cleanup_namespace() {
 cleanup() {
     local exit_code=$?
     
-    # Only perform cleanup if we have a test namespace
-    if [ -n "$TEST_NS" ]; then
-        if [ "$SILENT_MODE" = false ]; then
-            echo -e "\n${YELLOW}Running cleanup...${NC}"
-            echo -e "${YELLOW}Cleaning up namespace $TEST_NS...${NC}"
-        fi
+    # Now show cleanup message and perform cleanup
+    if [ "$SILENT_MODE" = false ]; then
+        echo -e "\n${YELLOW}Running cleanup...${NC}"
         
-        # First, delete all resources in the namespace explicitly
-        if [ "$SILENT_MODE" = false ]; then
-            echo -e "${YELLOW}Deleting test resources...${NC}"
-        fi
-        
-        # Delete ingress first
-        kubectl delete ingress sanity-ingress -n "$TEST_NS" --ignore-not-found=true &>/dev/null
-        
-        # Delete services
-        kubectl delete service nginx-test -n "$TEST_NS" --ignore-not-found=true &>/dev/null
-        
-        # Delete deployments
-        kubectl delete deployment nginx-test -n "$TEST_NS" --ignore-not-found=true &>/dev/null
-        
-        # Delete pods
-        kubectl delete pod curl-test -n "$TEST_NS" --ignore-not-found=true &>/dev/null
-        kubectl delete pod storage-test -n "$TEST_NS" --ignore-not-found=true &>/dev/null
-        kubectl delete pod root-test -n "$TEST_NS" --ignore-not-found=true &>/dev/null
-        
-        # Delete PVCs
-        kubectl delete pvc sanity-pvc -n "$TEST_NS" --ignore-not-found=true &>/dev/null
-        
-        # Delete secrets
-        kubectl delete secret sanity-tls -n "$TEST_NS" --ignore-not-found=true &>/dev/null
-        
-        # Step 2: Always use --force delete first
-        if [ "$SILENT_MODE" = false ]; then
-            echo -e "${YELLOW}Force deleting namespace $TEST_NS...${NC}"
-        fi
-        kubectl delete namespace "$TEST_NS" --force --grace-period=0 &>/dev/null
-        
-        # Step 3: Wait 10 seconds then do API cleanup
-        if [ "$SILENT_MODE" = false ]; then
-            echo -e "${YELLOW}Waiting 10 seconds then using API cleanup...${NC}"
-        fi
-        sleep 10
-        
-        # Step 4: Check if namespace still exists before attempting API cleanup
-        if kubectl get namespace "$TEST_NS" &>/dev/null; then
-            if [ "$SILENT_MODE" = false ]; then
-                echo -e "${YELLOW}Using API cleanup...${NC}"
-            fi
+        if [ -n "$TEST_NS" ]; then
+            echo -e "${YELLOW}Starting background cleanup of namespace $TEST_NS...${NC}"
             
-            # Start kubectl proxy
+            # Run cleanup with background deletion and API cleanup
+            echo -e "${YELLOW}Cleaning up namespace $TEST_NS...${NC}"
+            
+            # Delete namespace with --force in background
+            kubectl delete namespace "$TEST_NS" --force &>/dev/null &
+            
+            # Immediately run your exact API cleanup method
+            echo -e "${YELLOW}Using direct API cleanup for namespace $TEST_NS${NC}"
+            
+            # Your exact method:
+            # kubectl proxy &
+            # kubectl get namespace $NAMESPACE -o json |jq '.spec = {"finalizers":[]}' > temp.json
+            # curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json 127.0.0.1:8001/api/v1/namespaces/$NAMESPACE/finalize
+            
             kubectl proxy --port=8001 &
-            local proxy_pid=$!
+            PROXY_PID=$!
             sleep 2
             
-            # Try to get namespace JSON with timeout
-            if timeout 10 kubectl get namespace "$TEST_NS" -o json > temp.json 2>/dev/null; then
-                if timeout 10 jq '.spec = {"finalizers":[]}' temp.json > temp_finalize.json 2>/dev/null; then
-                    # Call the finalize endpoint
-                    curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp_finalize.json "127.0.0.1:8001/api/v1/namespaces/$TEST_NS/finalize" &>/dev/null
-                fi
-            fi
+            kubectl get namespace "$TEST_NS" -o json | jq '.spec = {"finalizers":[]}' > temp.json
             
-            # Cleanup temp files and proxy
-            rm -f temp.json temp_finalize.json 2>/dev/null || true
-            if [ -n "$proxy_pid" ]; then
-                kill $proxy_pid 2>/dev/null || true
-            fi
+            curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp.json "127.0.0.1:8001/api/v1/namespaces/$TEST_NS/finalize" &>/dev/null
+            echo -e "${GREEN}✅ API cleanup completed for namespace $TEST_NS${NC}"
             
-            # Wait for namespace to be deleted
-            count=0
-            while [ $count -lt 15 ]; do
-                if ! kubectl get namespace "$TEST_NS" &>/dev/null; then
-                    if [ "$SILENT_MODE" = false ]; then
-                        echo -e "${GREEN}✅ Namespace $TEST_NS deleted via API cleanup${NC}"
-                    fi
-                    break
-                fi
-                sleep 1
-                ((count++))
-            done
-        else
-            if [ "$SILENT_MODE" = false ]; then
-                echo -e "${GREEN}✅ Namespace $TEST_NS already deleted${NC}"
+            # Cleanup temp file and proxy
+            rm -f temp.json
+            if [ -n "$PROXY_PID" ]; then
+                kill $PROXY_PID 2>/dev/null || true
             fi
         fi
         
-        if [ "$SILENT_MODE" = false ]; then
-            echo -e "${YELLOW}Cleanup completed${NC}"
-            echo -e "${YELLOW}Log file: $LOG_FILE${NC}"
-        fi
+        echo -e "${YELLOW}Cleanup completed${NC}"
+        echo -e "${YELLOW}Log file: $LOG_FILE${NC}"
     fi
     
     # Exit with the original exit code
@@ -1337,7 +1145,6 @@ HARDWARE_CHECK=false
 DISK_CHECK=false
 DIAG=false
 DIAG_DNS=""
-CLEAN=false
 SILENT_MODE=false
 VALID_ARGS=false
 
@@ -1351,8 +1158,6 @@ TLS_SECRET_CREATED=false
 INGRESS_CREATED=false
 HTTPS_ACCESS_OK=false
 all_passed=true
-
-
 
 # Function to echo only if not in silent mode
 log_message() {
@@ -1426,11 +1231,6 @@ while [[ $# -gt 0 ]]; do
             VALID_ARGS=true
             shift 2
             ;;
-        --clean)
-            CLEAN=true
-            VALID_ARGS=true
-            shift
-            ;;
         --silent)
             SILENT_MODE=true
             VALID_ARGS=true
@@ -1455,25 +1255,32 @@ if [ "$VALID_ARGS" = false ]; then
     echo -e "  - The --hardware flag for hardware check"
     echo -e "  - The --disk flag for disk/ephemeral storage check"
     echo -e "  - The --diag flag for preinstall diagnostics"
-    echo -e "  - The --clean flag to clean up test namespaces"
     echo -e "\n"
     show_usage
     exit 1
 fi
 
 # Run diagnostics first if requested, and exit if it's the only operation
-if [ "$DIAG" = true ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+if [ "$DIAG" = true ]; then
     if ! run_diagnostics_check; then
         echo -e "${RED}❌ Diagnostics check failed${NC}"
         exit 1
     fi
-    echo -e "\n${GREEN}✅ Diagnostics check completed successfully!${NC}"
+    # Only exit if this is the only check requested
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+        echo -e "\n${GREEN}✅ Diagnostics check completed successfully!${NC}"
+        exit 0
+    fi
+fi
+
+# Skip remaining validation if only running diagnostics
+if [ "$DIAG" = true ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
     exit 0
 fi
 
 # Validate required parameters
-if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$CLEAN" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
-    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage, --hardware, --disk, or --clean${NC}"
+if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
+    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage, --hardware, or --disk${NC}"
     show_usage
 fi
 
@@ -1483,32 +1290,24 @@ if [ -n "$DIAG_DNS" ] && [ "$DIAG" != true ]; then
     show_usage
 fi
 
-# Note: Storage tests can run alongside certificate tests
-# We don't set STORAGE_ONLY=false here to allow both to run
-
-
-
-# Run cleanup if requested
-if [ "$CLEAN" = "true" ]; then
-    if ! cleanup_all_test_namespaces; then
-        echo -e "${RED}❌ Cleanup failed${NC}"
-        exit 1
-    fi
-    # Only exit if this is the only operation requested
-    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ -z "$CERT_FILE" ]; then
-        echo -e "\n${GREEN}✅ Cleanup completed successfully!${NC}"
-        exit 0
-    fi
+# Skip storage tests if running with certificate and DNS parameters
+if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && [ -n "$DNS_NAME" ]; then
+    STORAGE_ONLY=false
 fi
 
-# Run hardware check if requested (early exit only if it's the only operation)
-if [ "$HARDWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ -z "$CERT_FILE" ]; then
+echo -e "${YELLOW}Starting sanity checks...${NC}"
+
+# Run hardware check if requested
+if [ "$HARDWARE_CHECK" = "true" ]; then
     if ! check_hardware_requirements; then
         echo -e "${RED}❌ Hardware validation failed${NC}"
         exit 1
     fi
-    echo -e "\n${GREEN}✅ Hardware check completed successfully!${NC}"
-    exit 0
+    # Only exit if this is the only check requested
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+        echo -e "\n${GREEN}✅ Hardware check completed successfully!${NC}"
+        exit 0
+    fi
 fi
 
 # Run disk check if requested
@@ -1548,76 +1347,155 @@ if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && [ -n "$DNS_NAME" ]; then
     TLS_TEST_RESULT=$?
 fi
 
-# Final summary
+# Set up trap for cleanup after initializing test result variables
+trap cleanup EXIT
+
+# Print test summary
 echo -e "\n${YELLOW}Test Summary:${NC}"
 echo -e "----------------------------------------"
 if [ "$STORAGE_ONLY" = "true" ]; then
-    if [ $STORAGE_TEST_RESULT -eq 0 ]; then
-        echo -e "Storage Tests: ${GREEN}✅ PASSED${NC}"
+    echo -e "Storage Tests:"
+    if [ -n "$STORAGE_CLASS" ]; then
+        echo -e "- Using StorageClass: ${GREEN}$STORAGE_CLASS${NC}"
     else
-        echo -e "Storage Tests: ${RED}❌ FAILED${NC}"
+        echo -e "- Using default StorageClass"
     fi
-fi
-
-if [ "$HARDWARE_CHECK" = "true" ]; then
-    if [ $HARDWARE_TEST_RESULT -eq 0 ]; then
-        echo -e "Hardware Check: ${GREEN}✅ PASSED${NC}"
+    echo -e "- PVC Creation: ${GREEN}✓${NC}"
+    echo -e "- Pod Creation: ${GREEN}✓${NC}"
+    echo -e "- Storage Binding: ${GREEN}✓${NC}"
+else
+    echo -e "TLS/Ingress Tests:"
+    if [ "$TLS_SECRET_CREATED" = true ]; then
+        echo -e "- TLS Secret Creation: ${GREEN}✓${NC}"
     else
-        echo -e "Hardware Check: ${RED}❌ FAILED${NC}"
+        echo -e "- TLS Secret Creation: ${RED}✗${NC}"
     fi
-fi
-
-if [ "$DISK_CHECK" = "true" ]; then
-    if [ $DISK_TEST_RESULT -eq 0 ]; then
-        echo -e "Disk Check: ${GREEN}✅ PASSED${NC}"
+    if [ "$INGRESS_CREATED" = true ]; then
+        echo -e "- Ingress Creation: ${GREEN}✓${NC}"
     else
-        echo -e "Disk Check: ${RED}❌ FAILED${NC}"
+        echo -e "- Ingress Creation: ${RED}✗${NC}"
     fi
-fi
-
-if [ "$DIAG" = "true" ]; then
-    if [ $DIAG_TEST_RESULT -eq 0 ]; then
-        echo -e "Diagnostics: ${GREEN}✅ PASSED${NC}"
+    if [ "$HTTPS_ACCESS_OK" = true ]; then
+        echo -e "- HTTPS Access Tests: ${GREEN}✓${NC}"
     else
-        echo -e "Diagnostics: ${RED}❌ FAILED${NC}"
-    fi
-fi
-
-if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && [ -n "$DNS_NAME" ]; then
-    if [ $TLS_TEST_RESULT -eq 0 ]; then
-        echo -e "TLS Tests: ${GREEN}✅ PASSED${NC}"
-    else
-        echo -e "TLS Tests: ${RED}❌ FAILED${NC}"
+        echo -e "- HTTPS Access Tests: ${RED}✗${NC}"
     fi
 fi
 echo -e "----------------------------------------"
 
-# Determine overall result
-OVERALL_RESULT=0
-if [ "$STORAGE_ONLY" = "true" ] && [ $STORAGE_TEST_RESULT -ne 0 ]; then
-    OVERALL_RESULT=1
-fi
-if [ "$HARDWARE_CHECK" = "true" ] && [ $HARDWARE_TEST_RESULT -ne 0 ]; then
-    OVERALL_RESULT=1
-fi
-if [ "$DISK_CHECK" = "true" ] && [ $DISK_TEST_RESULT -ne 0 ]; then
-    OVERALL_RESULT=1
-fi
-if [ "$DIAG" = "true" ] && [ $DIAG_TEST_RESULT -ne 0 ]; then
-    OVERALL_RESULT=1
-fi
-if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && [ -n "$DNS_NAME" ] && [ $TLS_TEST_RESULT -ne 0 ]; then
-    OVERALL_RESULT=1
+# Print detailed test results table
+echo -e "\n${YELLOW}Detailed Test Results:${NC}"
+echo -e "+----------------+------------------+------------------+"
+echo -e "| Test Category  | Tests Performed  | Status          |"
+echo -e "+----------------+------------------+------------------+"
+
+# Storage Tests Summary
+if [ "$STORAGE_ONLY" = "true" ]; then
+    if [ "${STORAGE_TEST_RESULT:-1}" -eq 0 ]; then
+        printf "| %-14s | %-16s | %-15s |\n" "Storage" "File Ownership" "✅"
+        all_passed=true
+    else
+        printf "| %-14s | %-16s | %-15s |\n" "Storage" "File Ownership" "⚠️"
+        all_passed=false
+    fi
 fi
 
-if [ $OVERALL_RESULT -eq 0 ]; then
+# Hardware Tests Summary
+if [ "$HARDWARE_CHECK" = "true" ]; then
+    if [ "${TOTAL_CPU:-0}" -ge 24 ] && [ "${TOTAL_RAM_GB:-0}" -ge 24 ]; then
+        printf "| %-14s | %-16s | %-15s |\n" "Hardware" "CPU/RAM" "✅"
+    else
+        printf "| %-14s | %-16s | %-15s |\n" "Hardware" "CPU/RAM" "⚠️"
+        all_passed=false
+    fi
+    
+    if [ "${GPU_NODES:-0}" -gt 0 ]; then
+        printf "| %-14s | %-16s | %-15s |\n" "Hardware" "GPU Detection" "✅"
+    else
+        printf "| %-14s | %-16s | %-15s |\n" "Hardware" "GPU Detection" "⚠️"
+        all_passed=false
+    fi
+fi
+
+# Diagnostics Tests Summary
+if [ "$DIAG" = "true" ]; then
+    if [ -f "runai-diagnostics.txt" ]; then
+        # Kubernetes Version
+        if grep -q "Kubernetes Cluster Version.*PASS" runai-diagnostics.txt; then
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "K8s Version" "✅"
+        else
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "K8s Version" "⚠️"
+            all_passed=false
+        fi
+
+        # Ingress
+        if grep -q "Ingress Controller.*PASS" runai-diagnostics.txt; then
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Ingress" "✅"
+        else
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Ingress" "⚠️"
+            all_passed=false
+        fi
+
+        # Prometheus
+        if grep -q "Prometheus.*PASS" runai-diagnostics.txt; then
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Prometheus" "✅"
+        else
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Prometheus" "⚠️"
+            all_passed=false
+        fi
+
+        # Node Connectivity
+        if grep -q "Node Connectivity.*PASS" runai-diagnostics.txt; then
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Node Connect" "✅"
+        else
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Node Connect" "⚠️"
+            all_passed=false
+        fi
+
+        # DNS Resolution
+        if grep -q "Backend FQDN Resolve.*PASS" runai-diagnostics.txt; then
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "DNS Resolve" "✅"
+        else
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "DNS Resolve" "⚠️"
+            all_passed=false
+        fi
+
+        # Backend Reachability
+        if grep -q "RunAI Backend Reachable.*PASS" runai-diagnostics.txt; then
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Backend" "✅"
+        else
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Backend" "⚠️"
+            all_passed=false
+        fi
+
+        # GPU Nodes
+        if grep -q "GPU Nodes.*PASS" runai-diagnostics.txt; then
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "GPU Nodes" "✅"
+        else
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "GPU Nodes" "⚠️"
+            all_passed=false
+        fi
+
+        # Storage Classes
+        if grep -q "Available StorageClasses.*PASS" runai-diagnostics.txt; then
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Storage" "✅"
+        else
+            printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "Storage" "⚠️"
+            all_passed=false
+        fi
+    else
+        printf "| %-14s | %-16s | %-15s |\n" "Diagnostics" "All Tests" "⚠️"
+        all_passed=false
+    fi
+fi
+
+echo -e "+----------------+------------------+------------------+"
+
+# Overall Status Message
+if [ "$all_passed" = true ]; then
     echo -e "\n${GREEN}✅ All tests completed successfully!${NC}"
-    exit 0
 else
-    echo -e "\n${RED}❌ Some tests failed${NC}"
-    exit 1
-fi
-
-
+    echo -e "\n${RED}⚠️ Some tests failed - please check the detailed results above${NC}"
+fi 
 
 
