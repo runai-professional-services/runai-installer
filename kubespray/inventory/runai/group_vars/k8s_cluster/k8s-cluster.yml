@@ -219,6 +219,7 @@ dns_domain: "{{ cluster_name }}"
 ## Container runtime
 ## docker for docker, crio for cri-o and containerd for containerd.
 ## Default: containerd
+crio_download_crio: false
 container_manager: containerd
 
 # Additional container runtimes
