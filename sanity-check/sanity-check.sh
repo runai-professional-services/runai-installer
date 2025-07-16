@@ -400,36 +400,43 @@ check_hardware_requirements() {
         local has_master=false
         local has_worker=false
         
-        # Check for master role
+        # Check for control-plane role (newer label)
         if kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null | grep -q "true"; then
             has_master=true
-            node_roles="master"
+        fi
+        
+        # Check for legacy master role
+        if kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/master}' 2>/dev/null | grep -q "true"; then
+            has_master=true
         fi
         
         # Check for worker role
         if kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/worker}' 2>/dev/null | grep -q "true"; then
             has_worker=true
+        fi
+        
+        # Determine the role display
+        if [ "$has_master" = true ] && [ "$has_worker" = true ]; then
+            node_roles="master+worker"
+        elif [ "$has_master" = true ]; then
+            node_roles="master"
+        elif [ "$has_worker" = true ]; then
+            node_roles="worker"
+        else
+            # If no explicit roles found, check if it's a control-plane node (which can also run workloads)
             if [ "$has_master" = true ]; then
-                node_roles="worker+master"
+                node_roles="master+worker"
             else
                 node_roles="worker"
             fi
-        elif [ "$has_master" = false ]; then
-            # If no explicit roles found, assume worker
-            has_worker=true
-            node_roles="worker"
-        fi
-        
-        # If we still don't have roles, check for legacy master label
-        if [ -z "$node_roles" ]; then
-            if kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/master}' 2>/dev/null | grep -q "true"; then
-                has_master=true
-                node_roles="master"
-            fi
         fi
 
-        # Display node role
-        echo -e "└─ Role: ${YELLOW}$node_roles${NC}"
+        # Display node role with better formatting
+        if [ "$node_roles" = "master+worker" ]; then
+            echo -e "└─ Role: ${YELLOW}master+worker${NC} (control-plane + workload)"
+        else
+            echo -e "└─ Role: ${YELLOW}$node_roles${NC}"
+        fi
 
         # Get OS information
         OS_INFO=$(kubectl get nodes "$node" -o wide --no-headers | awk '{for(i=8;i<=NF-1;i++) printf "%s ", $i; print ""}' | sed 's/ $//' | sed 's/containerd.*$//')
