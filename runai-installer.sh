@@ -7,6 +7,26 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Check for required dependencies
+check_dependencies() {
+    echo -e "${BLUE}Checking required dependencies...${NC}"
+    
+    # Check for jq
+    if ! command -v jq &> /dev/null; then
+        echo -e "${RED}❌ Error: jq is not installed${NC}"
+        echo -e "${YELLOW}Please install jq before running this script:${NC}"
+        echo -e "${YELLOW}  Ubuntu/Debian: sudo apt-get install jq${NC}"
+        echo -e "${YELLOW}  CentOS/RHEL: sudo yum install jq${NC}"
+        echo -e "${YELLOW}  macOS: brew install jq${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}✅ All required dependencies are installed${NC}"
+}
+
+# Check dependencies first
+check_dependencies
+
 # Debug information
 echo "Script started at $(date)"
 echo "Script path: $0"
