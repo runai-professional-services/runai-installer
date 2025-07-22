@@ -130,9 +130,9 @@ EOF
     echo -e "${BLUE}Creating TLS secrets in Kubernetes...${NC}"
     
     # Delete existing secrets first
-    kubectl -n runai-backend delete secret runai-backend-tls 2>/dev/null || true
-    kubectl -n runai-backend delete secret runai-ca-cert 2>/dev/null || true
-    kubectl -n runai delete secret runai-ca-cert 2>/dev/null || true
+    kubectl -n runai-backend delete secret runai-backend-tls >/dev/null 2>&1 || true
+    kubectl -n runai-backend delete secret runai-ca-cert >/dev/null 2>&1 || true
+    kubectl -n runai delete secret runai-ca-cert >/dev/null 2>&1 || true
 
     # Create new secrets
     if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY" "Create TLS secret"; then

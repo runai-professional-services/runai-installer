@@ -12,13 +12,18 @@ install_knative() {
 
     # Install Knative Core
     if ! log_command "kubectl apply -f https://github.com/knative/serving/releases/download/knative-v1.17.0/serving-core.yaml" "Install Knative Core"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to install Knative Core, continuing...${NC}"
         return 1
     fi
 
     # Install Knative Kourier
     if ! log_command "kubectl apply -f https://github.com/knative/net-kourier/releases/download/knative-v1.17.0/kourier.yaml" "Install Knative Kourier"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to install Kourier, continuing...${NC}"
+        return 1
+    fi
+
+    # Install Knative HPA
+    if ! log_command "kubectl apply -f https://github.com/knative/serving/releases/download/knative-v1.18.1/serving-hpa.yaml" "Install Knative HPA"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to install Knative HPA, continuing...${NC}"
         return 1
     fi
 

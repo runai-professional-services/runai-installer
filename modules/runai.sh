@@ -129,9 +129,9 @@ install_runai() {
             echo -e "${BLUE}Creating/updating TLS secrets...${NC}"
 
             # Delete existing secrets first
-            kubectl -n runai-backend delete secret runai-backend-tls 2>/dev/null || true
-            kubectl -n runai-backend delete secret runai-ca-cert 2>/dev/null || true
-            kubectl -n runai delete secret runai-ca-cert 2>/dev/null || true
+                kubectl -n runai-backend delete secret runai-backend-tls >/dev/null 2>&1 || true
+    kubectl -n runai-backend delete secret runai-ca-cert >/dev/null 2>&1 || true
+    kubectl -n runai delete secret runai-ca-cert >/dev/null 2>&1 || true
 
             # Create new secrets
             if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY" "Create TLS secret"; then
@@ -169,7 +169,7 @@ install_runai() {
         if ! log_command "helm repo add runai-backend https://runai.jfrog.io/artifactory/cp-charts-prod" "Add Run.ai backend Helm repo"; then
             echo -e "${YELLOW}⚠️ Warning: Failed to add runai-backend helm repo, continuing...${NC}"
         fi
-        if ! log_command "helm repo update" "Update Helm repos"; then
+        if ! log_command "helm repo update > /dev/null 2>&1" "Update Helm repos"; then
             echo -e "${YELLOW}⚠️ Warning: Failed to update helm repos, continuing...${NC}"
         fi
 
@@ -180,7 +180,7 @@ install_runai() {
         fi
 
         # Use --output json to suppress normal output and redirect stderr to /dev/null
-        if ! log_command "helm install runai-backend -n runai-backend runai-backend/control-plane --version \"$RUNAI_VERSION\" $HELM_OPTS" "Install Run.ai backend"; then
+        if ! log_command "helm install runai-backend -n runai-backend runai-backend/control-plane --version \"$RUNAI_VERSION\" $HELM_OPTS > /dev/null 2>&1" "Install Run.ai backend"; then
             echo -e "${RED}❌ Failed to install Run.ai backend${NC}"
             exit 1
         else
@@ -380,8 +380,8 @@ install_runai() {
     echo "Executing installation commands:" >> "$LOG_FILE"
     echo "$(cat install.sh)" >> "$LOG_FILE"
 
-    # Execute install.sh with progress
-    if ./install.sh 2>&1 | tee -a "$LOG_FILE"; then
+    # Execute install.sh with progress (suppress Helm output)
+    if ./install.sh > /dev/null 2>&1; then
         echo -e "${GREEN}✅ Run.ai cluster installation started${NC}"
     else
         echo -e "${RED}❌ Run.ai installation failed. Please check the logs at $LOG_FILE for details${NC}"

@@ -51,6 +51,9 @@ show_usage() {
     echo "  --patch-nginx          Patch existing Nginx Ingress Controller with external IP (requires --ip)"
     echo "  --prometheus           Install Prometheus Stack"
     echo "  --gpu-operator         Install NVIDIA GPU Operator"
+    echo "  --training             Install Kubeflow Training Operator"
+    echo "  --lws                  Install Local Workload Service (LWS)"
+    echo "  --install-sc           Install Local Path Provisioner and set as default storage class"
     echo "  --repo-secret FILE     Specify repository secret file location"
     echo "  --BCM                  Configure Bright Cluster Manager for Run.ai access"
     echo ""
@@ -68,7 +71,7 @@ show_usage() {
     echo "  $0 --dns kirson.runai.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem --repo-secret /root/jfrog"
     echo ""
     echo "  # Installing with additional components"
-    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --nginx --prometheus --gpu-operator --repo-secret /root/jfrog"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --nginx --prometheus --gpu-operator --training --lws --install-sc --repo-secret /root/jfrog"
     echo ""
     echo "  # Patching existing Nginx installation"
     echo "  $0 --dns 192.168.0.100.sslip.io --ip 192.168.0.214 --patch-nginx --repo-secret /root/jfrog"
@@ -224,6 +227,18 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GPU_OPERATOR=true
             shift
             ;;
+        --training)
+            INSTALL_TRAINING=true
+            shift
+            ;;
+        --lws)
+            INSTALL_LWS=true
+            shift
+            ;;
+        --install-sc)
+            INSTALL_STORAGE_CLASS=true
+            shift
+            ;;
         --repo-secret)
             REPO_SECRET="$2"
             if [ ! -f "$REPO_SECRET" ]; then
@@ -324,6 +339,21 @@ if [ "$INSTALL_GPU_OPERATOR" = true ]; then
     install_gpu_operator
 fi
 
+source ./modules/training.sh
+if [ "$INSTALL_TRAINING" = true ]; then
+    install_training_operator
+fi
+
+source ./modules/lws.sh
+if [ "$INSTALL_LWS" = true ]; then
+    install_lws
+fi
+
+source ./modules/storage-class.sh
+if [ "$INSTALL_STORAGE_CLASS" = true ]; then
+    install_storage_class
+fi
+
 source ./modules/knative.sh
 if [ "$INSTALL_KNATIVE" = true ]; then
     install_knative
@@ -352,6 +382,9 @@ echo -e "Install Nginx: $([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No"
 echo -e "Patch Nginx: $([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")"
 echo -e "Install Prometheus: $([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")"
 echo -e "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Training Operator: $([ "$INSTALL_TRAINING" = true ] && echo "Yes" || echo "No")"
+echo -e "Install LWS: $([ "$INSTALL_LWS" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Storage Class: $([ "$INSTALL_STORAGE_CLASS" = true ] && echo "Yes" || echo "No")"
 echo -e "Install Knative: $([ "$INSTALL_KNATIVE" = true ] && echo "Yes" || echo "No")"
 echo -e "Skip Certificate Setup: $([ "$NO_CERT" = true ] && echo "Yes" || echo "No")"
 echo -e "Custom Certificates: $([ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && echo "Yes" || echo "No")"

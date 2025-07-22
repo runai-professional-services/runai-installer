@@ -16,7 +16,7 @@ install_prometheus() {
         return 1
     fi
 
-    if ! log_command "helm install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace --set grafana.enabled=false" "Install Prometheus Stack"; then
+    if ! log_command "helm install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace --set grafana.enabled=false > /dev/null 2>&1" "Install Prometheus Stack"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to install prometheus stack, continuing...${NC}"
         return 1
     else
@@ -42,7 +42,7 @@ install_gpu_operator() {
         return 1
     fi
 
-    if ! log_command "helm install --wait --generate-name -n gpu-operator --create-namespace nvidia/gpu-operator" "Install NVIDIA GPU Operator"; then
+    if ! log_command "helm install --wait --generate-name -n gpu-operator --create-namespace nvidia/gpu-operator > /dev/null 2>&1" "Install NVIDIA GPU Operator"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to install NVIDIA GPU operator, continuing...${NC}"
         return 1
     else

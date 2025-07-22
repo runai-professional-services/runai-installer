@@ -49,7 +49,7 @@ install_nginx() {
     echo -e "${BLUE}Created nginx values file: $values_file${NC}"
 
     # Install Nginx Ingress Controller with specific version and values
-    if ! log_command "helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx --version 4.12.2 --namespace nginx-ingress --create-namespace -f $values_file" "Install Nginx Ingress Controller"; then
+    if ! log_command "helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx --version 4.12.2 --namespace nginx-ingress --create-namespace -f $values_file > /dev/null 2>&1" "Install Nginx Ingress Controller"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to install nginx ingress, continuing...${NC}"
         return 1
     else
