@@ -1,0 +1,8 @@
+basicConstraints = CA:FALSE
+authorityKeyIdentifier = keyid,issuer
+keyUsage = digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = *.kirson.lab
+DNS.2 = *.runai.kirson.lab
