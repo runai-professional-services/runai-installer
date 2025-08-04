@@ -36,7 +36,7 @@ install_nginx() {
 
     # Check if Nginx Ingress is already installed
     local existing_service=$(get_nginx_service_name)
-    if kubectl get ns nginx-ingress &> /dev/null && [ -n "$existing_service" ]; then
+    if kubectl get ns ingress-nginx &> /dev/null && [ -n "$existing_service" ]; then
         echo -e "${BLUE}Nginx Ingress Controller already installed.${NC}"
         if [ -n "$IP_ADDRESS" ]; then
             patch_nginx_service
@@ -49,7 +49,7 @@ install_nginx() {
     echo -e "${BLUE}Created nginx values file: $values_file${NC}"
 
     # Install Nginx Ingress Controller with specific version and values
-    if ! log_command "helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx --version 4.12.2 --namespace nginx-ingress --create-namespace -f $values_file > /dev/null 2>&1" "Install Nginx Ingress Controller"; then
+    if ! log_command "helm upgrade --install ingress-nginx ingress-nginx --repo https://kubernetes.github.io/ingress-nginx --version 4.12.2 --namespace ingress-nginx --create-namespace -f $values_file > /dev/null 2>&1" "Install Nginx Ingress Controller"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to install nginx ingress, continuing...${NC}"
         return 1
     else
@@ -62,7 +62,7 @@ install_nginx() {
         # Double-check that externalIPs is set correctly if IP_ADDRESS is provided
         local service_name=$(get_nginx_service_name)
         if [ -n "$IP_ADDRESS" ] && [ -n "$service_name" ]; then
-            if ! kubectl get svc -n nginx-ingress "$service_name" -o jsonpath='{.spec.externalIPs[0]}' | grep -q "$IP_ADDRESS"; then
+            if ! kubectl get svc -n ingress-nginx "$service_name" -o jsonpath='{.spec.externalIPs[0]}' | grep -q "$IP_ADDRESS"; then
                 echo -e "${YELLOW}⚠️ Warning: externalIPs not set correctly during installation, attempting to patch...${NC}"
                 patch_nginx_service
             fi
@@ -79,9 +79,9 @@ install_nginx() {
 get_nginx_service_name() {
     local service_name=""
     
-    # Try different possible service names
+    # Try different possible service names in the correct namespace
     for name in "ingress-nginx-controller" "nginx-ingress-ingress-nginx-controller" "ingress-nginx-controller-admission"; do
-        if kubectl get svc -n nginx-ingress "$name" &> /dev/null; then
+        if kubectl get svc -n ingress-nginx "$name" &> /dev/null; then
             service_name="$name"
             break
         fi
@@ -105,15 +105,15 @@ patch_nginx_service() {
     local service_name=$(get_nginx_service_name)
     if [ -z "$service_name" ]; then
         echo -e "${RED}❌ Error: Could not find nginx ingress controller service${NC}"
-        echo -e "${YELLOW}Available services in nginx-ingress namespace:${NC}"
-        kubectl get svc -n nginx-ingress 2>/dev/null || echo "No services found"
+        echo -e "${YELLOW}Available services in ingress-nginx namespace:${NC}"
+        kubectl get svc -n ingress-nginx 2>/dev/null || echo "No services found"
         return 1
     fi
 
     echo -e "${BLUE}Found nginx service: $service_name${NC}"
 
     # Check if the externalIP is already set to our IP
-    local current_ip=$(kubectl get svc -n nginx-ingress "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
+    local current_ip=$(kubectl get svc -n ingress-nginx "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
     if [ "$current_ip" = "$IP_ADDRESS" ]; then
         echo -e "${GREEN}✅ Nginx Ingress Controller already has the correct externalIP: $IP_ADDRESS${NC}"
         return 0
@@ -126,14 +126,14 @@ patch_nginx_service() {
     fi
 
     # Apply the patch directly
-    if ! log_command "kubectl patch svc -n nginx-ingress \"$service_name\" --type='merge' -p '{\"spec\":{\"externalIPs\":[\"$IP_ADDRESS\"]}}'" "Patch Nginx Ingress Controller service"; then
+    if ! log_command "kubectl patch svc -n ingress-nginx \"$service_name\" --type='merge' -p '{\"spec\":{\"externalIPs\":[\"$IP_ADDRESS\"]}}'" "Patch Nginx Ingress Controller service"; then
         echo -e "${RED}❌ Failed to patch Nginx Ingress service${NC}"
         echo -e "${YELLOW}⚠️ You may need to manually set externalIPs to $IP_ADDRESS${NC}"
         return 1
     fi
 
     # Verify the patch was applied
-    local new_ip=$(kubectl get svc -n nginx-ingress "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
+    local new_ip=$(kubectl get svc -n ingress-nginx "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
     if [ "$new_ip" = "$IP_ADDRESS" ]; then
         echo -e "${GREEN}✅ Successfully patched Nginx Ingress Controller with externalIP: $IP_ADDRESS${NC}"
     else

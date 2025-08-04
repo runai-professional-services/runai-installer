@@ -602,21 +602,29 @@ check_node_storage() {
         min_required_gb=$MIN_GPU_STORAGE_GB
     fi
 
-    # Warnings
+    # Always show storage information
     if [ "$cap_bytes" -lt $((min_required_gb * 1024 * 1024 * 1024)) ]; then
         echo "└─ Storage: warning Insufficient storage: ${cap_gb}GB < ${min_required_gb}GB minimum"
         TESTS_FAILED=true
+    else
+        echo "└─ Storage: ${cap_gb}GB available (minimum: ${min_required_gb}GB)"
     fi
+    
+    # Show usage information
     if [ "$used_pct" -ge 85 ]; then
-        echo "└─ Storage: warning High disk usage (${used_pct}%) - close to pressure!"
+        echo "└─ Usage: warning High disk usage (${used_pct}%) - close to pressure!"
         TESTS_FAILED=true
     elif [ "$used_pct" -ge 75 ]; then
-        echo "└─ Storage: warning Moderate disk usage (${used_pct}%)"
+        echo "└─ Usage: warning Moderate disk usage (${used_pct}%)"
+    else
+        echo "└─ Usage: ${used_pct}% used"
     fi
+    
+    # Check disk pressure
     local disk_pressure
     disk_pressure=$(kubectl get node "$node" -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}' 2>/dev/null)
     if [ "$disk_pressure" = "True" ]; then
-        echo "└─ Storage: warning Node is under disk pressure - pods may be evicted"
+        echo "└─ Status: warning Node is under disk pressure - pods may be evicted"
         TESTS_FAILED=true
     fi
 

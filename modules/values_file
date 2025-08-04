@@ -1,0 +1,20 @@
+controller:
+  allowSnippetAnnotations: true
+  extraArgs:
+    default-ssl-certificate: $(POD_NAMESPACE)/default-ingress-tls
+    enable-ssl-passthrough: ""
+    publish-service: $(POD_NAMESPACE)/ingress-nginx-controller
+  replicaCount: 2
+  service:
+    externalTrafficPolicy: Cluster
+    nodePorts:
+      http: "30080"
+      https: "30443"
+    type: NodePort
+  tolerations:
+    - effect: NoSchedule
+      key: node-role.kubernetes.io/master
+      operator: Exists
+    - effect: NoSchedule
+      key: node-role.kubernetes.io/control-plane
+      operator: Exists

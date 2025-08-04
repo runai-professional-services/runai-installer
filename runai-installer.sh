@@ -56,6 +56,10 @@ show_usage() {
     echo "  --install-sc           Install Local Path Provisioner and set as default storage class"
     echo "  --repo-secret FILE     Specify repository secret file location"
     echo "  --BCM                  Configure Bright Cluster Manager for Run.ai access"
+    echo "  --air-gapped           Enable air-gapped installation mode"
+    echo "  --file FILE            Air-gapped tar.gz file to extract (required with --air-gapped)"
+    echo "  --registry URL         Registry URL for air-gapped installation (required with --air-gapped)"
+    echo "  --registry-secret FILE Registry secret YAML file to apply (required with --air-gapped)"
     echo ""
     echo "Examples:"
     echo "  # Using sslip.io (automatic DNS resolution)"
@@ -75,6 +79,9 @@ show_usage() {
     echo ""
     echo "  # Patching existing Nginx installation"
     echo "  $0 --dns 192.168.0.100.sslip.io --ip 192.168.0.214 --patch-nginx --repo-secret /root/jfrog"
+    echo ""
+    echo "  # Air-gapped installation (no --runai-version needed)"
+    echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com --registry-secret /path/to/registry-secret.yaml"
     exit 1
 }
 
@@ -85,8 +92,9 @@ validate_params() {
         show_usage
     fi
 
-    if [ -z "$RUNAI_VERSION" ]; then
-        echo -e "${RED}Error: --runai-version is required${NC}"
+    # Run.ai version is only required when not in air-gapped mode
+    if [ "$AIR_GAPPED_MODE" != true ] && [ -z "$RUNAI_VERSION" ]; then
+        echo -e "${RED}Error: --runai-version is required (unless using --air-gapped mode)${NC}"
         show_usage
     fi
 
@@ -108,6 +116,24 @@ validate_params() {
     if [ -n "$CA_CERT_FILE" ] && [ ! -f "$CA_CERT_FILE" ]; then
         echo -e "${RED}Error: CA certificate file not found: $CA_CERT_FILE${NC}"
         show_usage
+    fi
+
+    # Validate air-gapped parameters
+    if [ "$AIR_GAPPED_MODE" = true ]; then
+        if [ -z "$AIR_GAPPED_FILE" ]; then
+            echo -e "${RED}Error: --file is required when using --air-gapped${NC}"
+            show_usage
+        fi
+        
+        if [ -z "$REGISTRY_URL" ]; then
+            echo -e "${RED}Error: --registry is required when using --air-gapped${NC}"
+            show_usage
+        fi
+        
+        if [ -z "$REGISTRY_SECRET_FILE" ]; then
+            echo -e "${RED}Error: --registry-secret is required when using --air-gapped${NC}"
+            show_usage
+        fi
     fi
 }
 
@@ -247,6 +273,22 @@ while [[ $# -gt 0 ]]; do
             fi
             shift 2
             ;;
+        --air-gapped)
+            AIR_GAPPED_MODE=true
+            shift
+            ;;
+        --file)
+            AIR_GAPPED_FILE="$2"
+            shift 2
+            ;;
+        --registry)
+            REGISTRY_URL="$2"
+            shift 2
+            ;;
+        --registry-secret)
+            REGISTRY_SECRET_FILE="$2"
+            shift 2
+            ;;
         --BCM)
             BCM_CONFIG=true
             shift
@@ -278,9 +320,12 @@ init_logging
 source ./modules/helm.sh
 check_helm_version
 
-source ./modules/certificates.sh
-if [ "$NO_CERT" != true ]; then
-    setup_certificates
+# Only setup certificates if not in air-gapped mode (air-gapped handles its own certificates)
+if [ "$AIR_GAPPED_MODE" != true ]; then
+    source ./modules/certificates.sh
+    if [ "$NO_CERT" != true ]; then
+        setup_certificates
+    fi
 fi
 
 # Configure BCM early if requested
@@ -359,8 +404,23 @@ if [ "$INSTALL_KNATIVE" = true ]; then
     install_knative
 fi
 
-source ./modules/runai.sh
-install_runai
+source ./modules/air-gapped.sh
+if [ "$AIR_GAPPED_MODE" = true ]; then
+    if handle_air_gapped; then
+        echo -e "${GREEN}✅ Air-gapped installation completed successfully${NC}"
+        # Continue with additional components instead of exiting
+    else
+        echo -e "${RED}❌ Air-gapped installation failed${NC}"
+        echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
+        exit 1
+    fi
+fi
+
+# Only install Run.ai if not in air-gapped mode (air-gapped handles its own installation)
+if [ "$AIR_GAPPED_MODE" != true ]; then
+    source ./modules/runai.sh
+    install_runai
+fi
 
 # Display configuration summary
 echo -e "\n${GREEN}"
@@ -390,6 +450,12 @@ echo -e "Skip Certificate Setup: $([ "$NO_CERT" = true ] && echo "Yes" || echo "
 echo -e "Custom Certificates: $([ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && echo "Yes" || echo "No")"
 echo -e "Repository Secret: $([ -n "$REPO_SECRET" ] && echo "$REPO_SECRET" || echo "None")"
 echo -e "BCM Configuration: $([ "$BCM_CONFIG" = true ] && echo "Yes" || echo "No")"
+echo -e "Air-gapped Mode: $([ "$AIR_GAPPED_MODE" = true ] && echo "Yes" || echo "No")"
+if [ "$AIR_GAPPED_MODE" = true ]; then
+    echo -e "Air-gapped File: $([ -n "$AIR_GAPPED_FILE" ] && echo "$AIR_GAPPED_FILE" || echo "None")"
+    echo -e "Registry URL: $([ -n "$REGISTRY_URL" ] && echo "$REGISTRY_URL" || echo "None")"
+    echo -e "Registry Secret: $([ -n "$REGISTRY_SECRET_FILE" ] && echo "$REGISTRY_SECRET_FILE" || echo "None")"
+fi
 
 # Final success message
 echo -e "\n${GREEN}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
