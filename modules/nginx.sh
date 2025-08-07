@@ -35,9 +35,12 @@ install_nginx() {
     echo -e "${BLUE}Installing Nginx Ingress Controller...${NC}"
 
     # Check if Nginx Ingress is already installed
-    local existing_service=$(get_nginx_service_name)
-    if kubectl get ns ingress-nginx &> /dev/null && [ -n "$existing_service" ]; then
-        echo -e "${BLUE}Nginx Ingress Controller already installed.${NC}"
+    local service_info=$(get_nginx_service_info)
+    local existing_service=$(echo "$service_info" | cut -d: -f1)
+    local existing_namespace=$(echo "$service_info" | cut -d: -f2)
+    
+    if [ -n "$existing_service" ] && [ -n "$existing_namespace" ]; then
+        echo -e "${BLUE}Nginx Ingress Controller already installed in namespace: $existing_namespace${NC}"
         if [ -n "$IP_ADDRESS" ]; then
             patch_nginx_service
         fi
@@ -60,9 +63,11 @@ install_nginx() {
         sleep 10
 
         # Double-check that externalIPs is set correctly if IP_ADDRESS is provided
-        local service_name=$(get_nginx_service_name)
-        if [ -n "$IP_ADDRESS" ] && [ -n "$service_name" ]; then
-            if ! kubectl get svc -n ingress-nginx "$service_name" -o jsonpath='{.spec.externalIPs[0]}' | grep -q "$IP_ADDRESS"; then
+        local service_info=$(get_nginx_service_info)
+        local service_name=$(echo "$service_info" | cut -d: -f1)
+        local namespace=$(echo "$service_info" | cut -d: -f2)
+        if [ -n "$IP_ADDRESS" ] && [ -n "$service_name" ] && [ -n "$namespace" ]; then
+            if ! kubectl get svc -n "$namespace" "$service_name" -o jsonpath='{.spec.externalIPs[0]}' | grep -q "$IP_ADDRESS"; then
                 echo -e "${YELLOW}⚠️ Warning: externalIPs not set correctly during installation, attempting to patch...${NC}"
                 patch_nginx_service
             fi
@@ -75,18 +80,40 @@ install_nginx() {
     return 0
 }
 
-# Function to get the actual nginx ingress controller service name
-get_nginx_service_name() {
+# Function to get the actual nginx ingress controller service name and namespace
+get_nginx_service_info() {
     local service_name=""
+    local namespace=""
     
-    # Try different possible service names in the correct namespace
-    for name in "ingress-nginx-controller" "nginx-ingress-ingress-nginx-controller" "ingress-nginx-controller-admission"; do
-        if kubectl get svc -n ingress-nginx "$name" &> /dev/null; then
-            service_name="$name"
-            break
+    # Try to find nginx ingress controller in different namespaces
+    for ns in "ingress-nginx" "nginx-ingress" "kube-system"; do
+        # First try exact matches
+        for name in "ingress-nginx-controller" "nginx-ingress-ingress-nginx-controller" "ingress-nginx-controller-admission"; do
+            if kubectl get svc -n "$ns" "$name" &> /dev/null; then
+                service_name="$name"
+                namespace="$ns"
+                break 2
+            fi
+        done
+        
+        # If no exact match, try pattern matching for services with random suffixes
+        if [ -z "$service_name" ]; then
+            local pattern_matches=$(kubectl get svc -n "$ns" --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | grep -E "(ingress-nginx-controller|nginx-ingress-ingress-nginx-controller)" | head -1)
+            if [ -n "$pattern_matches" ]; then
+                service_name="$pattern_matches"
+                namespace="$ns"
+                break
+            fi
         fi
     done
     
+    echo "$service_name:$namespace"
+}
+
+# Function to get just the service name (for backward compatibility)
+get_nginx_service_name() {
+    local service_info=$(get_nginx_service_info)
+    local service_name=$(echo "$service_info" | cut -d: -f1)
     echo "$service_name"
 }
 
@@ -101,19 +128,25 @@ patch_nginx_service() {
 
     echo -e "${BLUE}Patching Nginx Ingress Controller service with IP: $IP_ADDRESS${NC}"
 
-    # Get the actual service name
-    local service_name=$(get_nginx_service_name)
-    if [ -z "$service_name" ]; then
+    # Get the actual service name and namespace
+    local service_info=$(get_nginx_service_info)
+    local service_name=$(echo "$service_info" | cut -d: -f1)
+    local namespace=$(echo "$service_info" | cut -d: -f2)
+    
+    if [ -z "$service_name" ] || [ -z "$namespace" ]; then
         echo -e "${RED}❌ Error: Could not find nginx ingress controller service${NC}"
-        echo -e "${YELLOW}Available services in ingress-nginx namespace:${NC}"
+        echo -e "${YELLOW}Available services in common namespaces:${NC}"
+        echo -e "${YELLOW}ingress-nginx namespace:${NC}"
         kubectl get svc -n ingress-nginx 2>/dev/null || echo "No services found"
+        echo -e "${YELLOW}nginx-ingress namespace:${NC}"
+        kubectl get svc -n nginx-ingress 2>/dev/null || echo "No services found"
         return 1
     fi
 
-    echo -e "${BLUE}Found nginx service: $service_name${NC}"
+    echo -e "${BLUE}Found nginx service: $service_name in namespace: $namespace${NC}"
 
     # Check if the externalIP is already set to our IP
-    local current_ip=$(kubectl get svc -n ingress-nginx "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
+    local current_ip=$(kubectl get svc -n "$namespace" "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
     if [ "$current_ip" = "$IP_ADDRESS" ]; then
         echo -e "${GREEN}✅ Nginx Ingress Controller already has the correct externalIP: $IP_ADDRESS${NC}"
         return 0
@@ -126,14 +159,14 @@ patch_nginx_service() {
     fi
 
     # Apply the patch directly
-    if ! log_command "kubectl patch svc -n ingress-nginx \"$service_name\" --type='merge' -p '{\"spec\":{\"externalIPs\":[\"$IP_ADDRESS\"]}}'" "Patch Nginx Ingress Controller service"; then
+    if ! log_command "kubectl patch svc -n \"$namespace\" \"$service_name\" --type='merge' -p '{\"spec\":{\"externalIPs\":[\"$IP_ADDRESS\"]}}'" "Patch Nginx Ingress Controller service"; then
         echo -e "${RED}❌ Failed to patch Nginx Ingress service${NC}"
         echo -e "${YELLOW}⚠️ You may need to manually set externalIPs to $IP_ADDRESS${NC}"
         return 1
     fi
 
     # Verify the patch was applied
-    local new_ip=$(kubectl get svc -n ingress-nginx "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
+    local new_ip=$(kubectl get svc -n "$namespace" "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
     if [ "$new_ip" = "$IP_ADDRESS" ]; then
         echo -e "${GREEN}✅ Successfully patched Nginx Ingress Controller with externalIP: $IP_ADDRESS${NC}"
     else
