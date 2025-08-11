@@ -56,27 +56,25 @@ setup_certificates() {
 
         echo -e "${BLUE}Generating certificates...${NC}"
         # Generate the root key with the provided passphrase
-        if ! openssl genrsa -des3 -passout env:OPENSSL_PASSWORD -out rootCA.key 2048 >> "$LOG_FILE" 2>&1; then
+        if ! log_command "openssl genrsa -des3 -passout env:OPENSSL_PASSWORD -out rootCA.key 2048" "Generate root CA private key"; then
             echo -e "${RED}❌ Failed to generate root key${NC}"
             exit 1
         fi
 
         # Generate root certificate
-        if ! openssl req -x509 -new -nodes -key rootCA.key -passin env:OPENSSL_PASSWORD -sha256 -days 730 \
-            -out rootCA.pem -subj "/C=US/ST=IL/L=USA/O=Jupyter/CN=self-signed-nvidia" >> "$LOG_FILE" 2>&1; then
+        if ! log_command "openssl req -x509 -new -nodes -key rootCA.key -passin env:OPENSSL_PASSWORD -sha256 -days 730 -out rootCA.pem -subj '/C=US/ST=IL/L=USA/O=Jupyter/CN=self-signed-nvidia'" "Generate root CA certificate"; then
             echo -e "${RED}❌ Failed to generate root certificate${NC}"
             exit 1
         fi
 
         # Generate a private key for your service
-        if ! openssl genrsa -out runai.key 2048 >> "$LOG_FILE" 2>&1; then
+        if ! log_command "openssl genrsa -out runai.key 2048" "Generate service private key"; then
             echo -e "${RED}❌ Failed to generate service key${NC}"
             exit 1
         fi
 
         # Generate a CSR for your service
-        if ! openssl req -new -key runai.key -out runai.csr \
-            -subj "/C=US/ST=IL/L=USA/O=RUNAI/CN=$DNS_NAME" >> "$LOG_FILE" 2>&1; then
+        if ! log_command "openssl req -new -key runai.key -out runai.csr -subj '/C=US/ST=IL/L=USA/O=RUNAI/CN=$DNS_NAME'" "Generate certificate signing request"; then
             echo -e "${RED}❌ Failed to generate CSR${NC}"
             exit 1
         fi
@@ -95,18 +93,16 @@ DNS.3 = *.${DNS_NAME#*.}
 EOF
 
         # Create the certificate
-        if ! openssl x509 -req -in runai.csr -CA rootCA.pem -CAkey rootCA.key \
-            -passin env:OPENSSL_PASSWORD -CAcreateserial -out runai.crt -days 730 \
-            -sha256 -extfile openssl.cnf >> "$LOG_FILE" 2>&1; then
+        if ! log_command "openssl x509 -req -in runai.csr -CA rootCA.pem -CAkey rootCA.key -passin env:OPENSSL_PASSWORD -CAcreateserial -out runai.crt -days 730 -sha256 -extfile openssl.cnf" "Create service certificate"; then
             echo -e "${RED}❌ Failed to create certificate${NC}"
             exit 1
         fi
 
         # Combine the certificates into a chain
-        cat runai.crt rootCA.pem > full-chain.pem
+        log_command "cat runai.crt rootCA.pem > full-chain.pem" "Create certificate chain"
 
         # Verify the certificate
-        if ! openssl verify -CAfile rootCA.pem runai.crt >> "$LOG_FILE" 2>&1; then
+        if ! log_command "openssl verify -CAfile rootCA.pem runai.crt" "Verify certificate"; then
             echo -e "${YELLOW}⚠️ Warning: Certificate verification failed, but continuing...${NC}"
         else
             echo -e "${GREEN}✅ Certificate verified successfully${NC}"

@@ -4,6 +4,18 @@
 handle_air_gapped() {
     echo -e "${BLUE}Starting air-gapped installation...${NC}"
     
+    # Ensure Docker is installed and running
+    echo -e "${BLUE}Checking Docker availability...${NC}"
+    if ! command -v docker >/dev/null 2>&1; then
+        echo -e "${RED}❌ Error: Docker is not installed or not in PATH. Please install Docker and try again.${NC}"
+        return 1
+    fi
+    if ! docker ps >/dev/null 2>&1; then
+        echo -e "${RED}❌ Error: 'docker ps' failed. Ensure the Docker daemon is running and you have permissions to run Docker.${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✅ Docker is available${NC}"
+    
     # Validate required air-gapped parameters
     if [ -z "$AIR_GAPPED_FILE" ]; then
         echo -e "${RED}❌ Error: --file is required for air-gapped installation${NC}"
@@ -27,13 +39,16 @@ handle_air_gapped() {
         # Handle custom certificates if provided
         if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ]; then
             echo -e "${BLUE}Using custom certificates...${NC}"
+            log_command "echo 'Using custom certificates: $CERT_FILE, $KEY_FILE'" "Setup custom certificates"
             export CERT="$CERT_FILE"
             export KEY="$KEY_FILE"
             
             if [ -n "$CA_CERT_FILE" ]; then
                 export FULL="$CA_CERT_FILE"
+                log_command "echo 'Using custom CA certificate: $CA_CERT_FILE'" "Setup custom CA certificate"
             else
                 export FULL="$CERT_FILE"
+                log_command "echo 'Using certificate as full chain: $CERT_FILE'" "Setup certificate chain"
             fi
         else
             echo -e "${BLUE}Generating self-signed certificates...${NC}"
@@ -41,6 +56,32 @@ handle_air_gapped() {
             source ./modules/certificates.sh
             setup_certificates
         fi
+        
+        # Create TLS secrets in Kubernetes (for both custom and self-signed certificates)
+        echo -e "${BLUE}Creating TLS secrets in Kubernetes...${NC}"
+        
+        # Delete existing secrets first
+        log_command "kubectl -n runai-backend delete secret runai-backend-tls >/dev/null 2>&1 || true" "Delete existing TLS secret in runai-backend"
+        log_command "kubectl -n runai-backend delete secret runai-ca-cert >/dev/null 2>&1 || true" "Delete existing CA cert secret in runai-backend"
+        log_command "kubectl -n runai delete secret runai-ca-cert >/dev/null 2>&1 || true" "Delete existing CA cert secret in runai"
+        
+        # Create new secrets
+        if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY" "Create TLS secret in runai-backend namespace"; then
+            echo -e "${RED}❌ Failed to create TLS secret in runai-backend namespace${NC}"
+            return 1
+        fi
+        
+        if ! log_command "kubectl create secret generic runai-ca-cert -n runai-backend --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai-backend namespace"; then
+            echo -e "${RED}❌ Failed to create CA cert secret in runai-backend namespace${NC}"
+            return 1
+        fi
+        
+        if ! log_command "kubectl create secret generic runai-ca-cert -n runai --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai namespace"; then
+            echo -e "${RED}❌ Failed to create CA cert secret in runai namespace${NC}"
+            return 1
+        fi
+        
+        echo -e "${GREEN}✅ TLS secrets created successfully${NC}"
     else
         echo -e "${BLUE}Skipping certificate setup as requested with --no-cert flag...${NC}"
     fi
@@ -74,6 +115,25 @@ handle_air_gapped() {
         return 1
     fi
     
+    # Configure BCM if requested (before changing directories)
+    if [ "$BCM_CONFIG" = true ]; then
+        echo -e "${BLUE}Configuring Bright Cluster Manager...${NC}"
+        source ./modules/bcm.sh
+        if configure_bcm; then
+            echo -e "${GREEN}✅ Bright Cluster Manager configuration completed successfully${NC}"
+        else
+            echo -e "${RED}❌ Bright Cluster Manager configuration failed${NC}"
+            return 1
+        fi
+    fi
+    
+    # Configure internal DNS if requested (before changing directories)
+    if [ "$INTERNAL_DNS" = true ]; then
+        echo -e "${BLUE}Configuring internal DNS...${NC}"
+        source ./modules/dns.sh
+        patch_coredns
+    fi
+    
     echo -e "${BLUE}Changing to air-gapped directory...${NC}"
     
     # Store current directory
@@ -94,25 +154,6 @@ handle_air_gapped() {
     fi
     
     echo -e "${GREEN}✅ Air-gapped file extracted successfully${NC}"
-    
-    # Configure BCM if requested
-    if [ "$BCM_CONFIG" = true ]; then
-        echo -e "${BLUE}Configuring Bright Cluster Manager...${NC}"
-        source ./modules/bcm.sh
-        if configure_bcm; then
-            echo -e "${GREEN}✅ Bright Cluster Manager configuration completed successfully${NC}"
-        else
-            echo -e "${RED}❌ Bright Cluster Manager configuration failed${NC}"
-            return 1
-        fi
-    fi
-    
-    # Configure internal DNS if requested
-    if [ "$INTERNAL_DNS" = true ]; then
-        echo -e "${BLUE}Configuring internal DNS...${NC}"
-        source ./modules/dns.sh
-        patch_coredns
-    fi
     
     # Apply registry secret to runai namespace
     echo -e "${BLUE}Applying registry secret to runai namespace...${NC}"
@@ -162,6 +203,10 @@ handle_air_gapped() {
     # Install Run.ai backend using helm
     echo -e "${BLUE}Installing Run.ai backend...${NC}"
     if [ -n "$DOMAIN" ]; then
+        # Ensure we have the right kubectl context and environment
+        export KUBECONFIG="$HOME/.kube/config"
+        kubectl config use-context "$(kubectl config current-context)" >/dev/null 2>&1
+        
         if ! log_command "helm upgrade -i runai-backend charts/control-plane.tgz --set global.domain=\"$DOMAIN\" --set global.customCA.enabled=true -n runai-backend -f custom-env.yaml" "Install Run.ai backend"; then
             echo -e "${RED}❌ Failed to install Run.ai backend${NC}"
             return 1
@@ -343,6 +388,10 @@ handle_air_gapped() {
             echo -e "${YELLOW}⚠️ Retrying cluster installation (Attempt $((retry_count + 1))/$max_retries)...${NC}"
             sleep 10  # Wait 10 seconds before retry
         fi
+        
+        # Ensure we have the right kubectl context and environment
+        export KUBECONFIG="$HOME/.kube/config"
+        kubectl config use-context "$(kubectl config current-context)" >/dev/null 2>&1
         
         if log_command "./install.sh" "Install Run.ai cluster components"; then
             echo -e "${GREEN}✅ Run.ai cluster installation started${NC}"

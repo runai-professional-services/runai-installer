@@ -12,15 +12,13 @@ show_usage() {
     echo -e "${YELLOW}Usage:${NC}"
     echo -e "  $0 [options]"
     echo -e "\n${YELLOW}Options:${NC}"
-    echo -e "  --fix          Attempt to install missing prerequisites"
     echo -e "  --skip-k8s     Skip Kubernetes cluster connectivity check"
     echo -e "  --verbose      Show detailed output"
     echo -e "  -h, --help     Show this help message"
     echo -e "\n${YELLOW}Examples:${NC}"
     echo -e "  $0                    # Check prerequisites only"
-    echo -e "  $0 --fix              # Check and install missing prerequisites"
     echo -e "  $0 --verbose          # Check with detailed output"
-    echo -e "  $0 --skip-k8s --fix   # Skip K8s check and install missing prereqs"
+    echo -e "  $0 --skip-k8s         # Skip K8s check"
 }
 
 # Function to detect OS
@@ -60,7 +58,6 @@ check_command() {
     local cmd="$1"
     local name="$2"
     local required_version="$3"
-    local install_cmd="$4"
     
     if command -v "$cmd" &>/dev/null; then
         if [ -n "$required_version" ]; then
@@ -74,10 +71,6 @@ check_command() {
                     if (( $(echo "$version >= $required_version" | bc -l 2>/dev/null) )); then
                         return 0
                     else
-                        if [ "$FIX_MODE" = true ]; then
-                            echo -e "${YELLOW}Upgrading $name...${NC}"
-                            eval "$install_cmd"
-                        fi
                         return 1
                     fi
                 else
@@ -90,104 +83,129 @@ check_command() {
             return 0
         fi
     else
-        if [ "$FIX_MODE" = true ] && [ -n "$install_cmd" ]; then
-            echo -e "${YELLOW}Installing $name...${NC}"
-            eval "$install_cmd"
-            # Check again after installation
-            if command -v "$cmd" &>/dev/null; then
-                return 0
-            else
-                return 1
-            fi
-        fi
         return 1
     fi
 }
 
-# Function to install packages based on OS
-install_package() {
-    local package="$1"
-    local os="$2"
-    
-    case "$os" in
-        *"Ubuntu"*|*"Debian"*)
-            sudo apt-get update && sudo apt-get install -y "$package"
-            ;;
-        *"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*)
-            if command -v dnf &>/dev/null; then
-                sudo dnf install -y "$package"
-            else
-                sudo yum install -y "$package"
-            fi
-            ;;
-        *"macOS"*)
-            if command -v brew &>/dev/null; then
-                brew install "$package"
-            elif command -v port &>/dev/null; then
-                sudo port install "$package"
-            else
-                echo -e "${RED}  └─ ❌ No package manager found (brew or port)${NC}"
-                return 1
-            fi
-            ;;
-        *)
-            echo -e "${RED}  └─ ❌ Unsupported OS: $os${NC}"
-            return 1
-            ;;
-    esac
-}
 
-# Function to install kubectl
-install_kubectl() {
-    local os="$1"
-    
-    case "$os" in
-        *"Ubuntu"*|*"Debian"*)
-            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-            sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-            rm kubectl
-            ;;
-        *"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*)
-            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-            sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-            rm kubectl
-            ;;
-        *"macOS"*)
-            if command -v brew &>/dev/null; then
-                brew install kubectl
-            else
-                curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/darwin/amd64/kubectl"
-                sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
-                rm kubectl
-            fi
-            ;;
-        *)
-            echo -e "${RED}  └─ ❌ Unsupported OS for kubectl installation: $os${NC}"
-            return 1
-            ;;
-    esac
-}
 
-# Function to install helm
-install_helm() {
+# Function to show installation instructions
+show_installation_instructions() {
     local os="$1"
+    shift
+    local missing_items=("$@")
     
-    case "$os" in
-        *"Ubuntu"*|*"Debian"*|*"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*)
-            curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            ;;
-        *"macOS"*)
-            if command -v brew &>/dev/null; then
-                brew install helm
-            else
-                curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-            fi
-            ;;
-        *)
-            echo -e "${RED}  └─ ❌ Unsupported OS for helm installation: $os${NC}"
-            return 1
-            ;;
-    esac
+    for item in "${missing_items[@]}"; do
+        case "$item" in
+            "curl")
+                echo -e "${BLUE}curl:${NC}"
+                case "$os" in
+                    *"Ubuntu"*|*"Debian"*) echo -e "  sudo apt-get install curl" ;;
+                    *"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*) echo -e "  sudo yum install curl  # or sudo dnf install curl" ;;
+                    *"macOS"*) echo -e "  brew install curl" ;;
+                    *) echo -e "  Install curl for your operating system" ;;
+                esac
+                ;;
+            "jq")
+                echo -e "${BLUE}jq:${NC}"
+                case "$os" in
+                    *"Ubuntu"*|*"Debian"*) echo -e "  sudo apt-get install jq" ;;
+                    *"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*) echo -e "  sudo yum install jq  # or sudo dnf install jq" ;;
+                    *"macOS"*) echo -e "  brew install jq" ;;
+                    *) echo -e "  Install jq for your operating system" ;;
+                esac
+                ;;
+            "unzip")
+                echo -e "${BLUE}unzip:${NC}"
+                case "$os" in
+                    *"Ubuntu"*|*"Debian"*) echo -e "  sudo apt-get install unzip" ;;
+                    *"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*) echo -e "  sudo yum install unzip  # or sudo dnf install unzip" ;;
+                    *"macOS"*) echo -e "  brew install unzip" ;;
+                    *) echo -e "  Install unzip for your operating system" ;;
+                esac
+                ;;
+            "timeout")
+                echo -e "${BLUE}timeout:${NC}"
+                case "$os" in
+                    *"Ubuntu"*|*"Debian"*) echo -e "  sudo apt-get install coreutils" ;;
+                    *"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*) echo -e "  sudo yum install coreutils  # or sudo dnf install coreutils" ;;
+                    *"macOS"*) echo -e "  Already included in macOS" ;;
+                    *) echo -e "  Install coreutils for your operating system" ;;
+                esac
+                ;;
+            "bc")
+                echo -e "${BLUE}bc:${NC}"
+                case "$os" in
+                    *"Ubuntu"*|*"Debian"*) echo -e "  sudo apt-get install bc" ;;
+                    *"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*) echo -e "  sudo yum install bc  # or sudo dnf install bc" ;;
+                    *"macOS"*) echo -e "  brew install bc" ;;
+                    *) echo -e "  Install bc for your operating system" ;;
+                esac
+                ;;
+            "kubectl")
+                echo -e "${BLUE}kubectl:${NC}"
+                echo -e "  curl -LO \"https://dl.k8s.io/release/\$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl\""
+                echo -e "  sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl"
+                echo -e "  rm kubectl"
+                ;;
+            "helm")
+                echo -e "${BLUE}helm:${NC}"
+                echo -e "  curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash"
+                ;;
+            "docker")
+                echo -e "${BLUE}Docker:${NC}"
+                case "$os" in
+                    *"Ubuntu"*|*"Debian"*)
+                        echo -e "  sudo apt-get update"
+                        echo -e "  sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release"
+                        echo -e "  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg"
+                        echo -e "  echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null"
+                        echo -e "  sudo apt-get update"
+                        echo -e "  sudo apt-get install -y docker-ce docker-ce-cli containerd.io"
+                        echo -e "  sudo systemctl start docker"
+                        echo -e "  sudo systemctl enable docker"
+                        echo -e "  sudo usermod -aG docker \$USER"
+                        echo -e "  # Log out and back in for group changes to take effect"
+                        ;;
+                    *"CentOS"*|*"Red Hat"*|*"Rocky"*|*"Fedora"*)
+                        echo -e "  sudo dnf -y install dnf-plugins-core"
+                        echo -e "  sudo dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo"
+                        echo -e "  sudo dnf install -y docker-ce docker-ce-cli containerd.io"
+                        echo -e "  sudo systemctl start docker"
+                        echo -e "  sudo systemctl enable docker"
+                        echo -e "  sudo usermod -aG docker \$USER"
+                        echo -e "  # Log out and back in for group changes to take effect"
+                        ;;
+                    *"macOS"*)
+                        echo -e "  brew install --cask docker"
+                        echo -e "  # Or download from: https://www.docker.com/products/docker-desktop"
+                        ;;
+                    *)
+                        echo -e "  Install Docker for your operating system"
+                        ;;
+                esac
+                ;;
+            "k8s-connectivity")
+                echo -e "${BLUE}Kubernetes connectivity:${NC}"
+                echo -e "  Ensure your Kubernetes cluster is running"
+                echo -e "  Configure kubectl with correct context: kubectl config use-context <context-name>"
+                echo -e "  Verify connectivity: kubectl cluster-info"
+                ;;
+            "preinstall-diagnostics.zip")
+                echo -e "${BLUE}preinstall-diagnostics.zip:${NC}"
+                echo -e "  Download the preinstall-diagnostics.zip file and place it in the current directory"
+                ;;
+            "sanity-check.sh")
+                echo -e "${BLUE}sanity-check.sh:${NC}"
+                echo -e "  Ensure sanity-check.sh is in the current directory"
+                ;;
+            *)
+                echo -e "${BLUE}$item:${NC}"
+                echo -e "  Install $item for your operating system"
+                ;;
+        esac
+        echo ""
+    done
 }
 
 # Function to check Kubernetes connectivity
@@ -238,72 +256,36 @@ check_k8s_connectivity() {
     fi
 }
 
-# Function to check required files
-check_required_files() {
-    echo -e "\n${BLUE}Checking required files...${NC}"
-    
-    local files_missing=false
-    
-    # Check for preinstall-diagnostics.zip
-    if [ ! -f "preinstall-diagnostics.zip" ]; then
-        echo -e "${RED}❌ preinstall-diagnostics.zip not found${NC}"
-        echo -e "${YELLOW}  └─ This file is required for diagnostics tests${NC}"
-        files_missing=true
-    else
-        echo -e "${GREEN}✅ preinstall-diagnostics.zip found${NC}"
-    fi
-    
-    # Check for sanity-check.sh
-    if [ ! -f "sanity-check.sh" ]; then
-        echo -e "${RED}❌ sanity-check.sh not found in current directory${NC}"
-        files_missing=true
-    else
-        echo -e "${GREEN}✅ sanity-check.sh found${NC}"
-        # Check if it's executable
-        if [ -x "sanity-check.sh" ]; then
-            echo -e "  └─ Script is executable"
-        else
-            echo -e "${YELLOW}  └─ Making script executable...${NC}"
-            chmod +x sanity-check.sh
-        fi
-    fi
-    
-    if [ "$files_missing" = true ]; then
+
+
+# Function to check Docker functionality
+check_docker() {
+    # Check if Docker is installed
+    if ! command -v docker &>/dev/null; then
         return 1
     fi
-    return 0
+    
+    # Check Docker version
+    local docker_version
+    docker_version=$(docker --version 2>/dev/null | head -1)
+    if [ -z "$docker_version" ]; then
+        return 1
+    fi
+    
+    # Check if Docker daemon is running
+    if ! docker info &>/dev/null; then
+        return 1
+    fi
+    
+    # Test Docker functionality with docker ps
+    if docker ps &>/dev/null; then
+        return 0
+    else
+        return 1
+    fi
 }
 
-# Function to check system resources
-check_system_resources() {
-    echo -e "\n${BLUE}Checking system resources...${NC}"
-    
-    # Check available memory
-    local mem_total
-    mem_total=$(free -g 2>/dev/null | awk 'NR==2{print $2}')
-    if [ -n "$mem_total" ]; then
-        if [ "$mem_total" -ge 4 ]; then
-            echo -e "${GREEN}✅ System memory: ${mem_total}GB${NC}"
-        else
-            echo -e "${YELLOW}⚠️ System memory: ${mem_total}GB (low for running tests)${NC}"
-        fi
-    else
-        echo -e "${YELLOW}⚠️ Could not determine system memory${NC}"
-    fi
-    
-    # Check available disk space
-    local disk_free
-    disk_free=$(df -BG . | awk 'NR==2{print $4}' | sed 's/G//')
-    if [ -n "$disk_free" ]; then
-        if [ "$disk_free" -ge 10 ]; then
-            echo -e "${GREEN}✅ Available disk space: ${disk_free}GB${NC}"
-        else
-            echo -e "${YELLOW}⚠️ Available disk space: ${disk_free}GB (low for running tests)${NC}"
-        fi
-    else
-        echo -e "${YELLOW}⚠️ Could not determine available disk space${NC}"
-    fi
-}
+
 
 # Main validation function
 validate_prerequisites() {
@@ -312,41 +294,69 @@ validate_prerequisites() {
     local missing_items=()
     local failed_checks=()
     
-    # Check system utilities
-    check_command "curl" "curl" "" "install_package curl \"$os\"" || missing_items+=("curl")
-    check_command "jq" "jq" "" "install_package jq \"$os\"" || missing_items+=("jq")
-    check_command "unzip" "unzip" "" "install_package unzip \"$os\"" || missing_items+=("unzip")
-    check_command "timeout" "timeout" "" "install_package coreutils \"$os\"" || missing_items+=("timeout")
-    check_command "bc" "bc" "" "install_package bc \"$os\"" || missing_items+=("bc")
+    echo -e "${BLUE}Detected OS: $os${NC}\n"
     
-    # Check standard Unix tools
-    check_command "awk" "awk" "" "" || missing_items+=("awk")
-    check_command "sed" "sed" "" "" || missing_items+=("sed")
-    check_command "grep" "grep" "" "" || missing_items+=("grep")
-    check_command "sort" "sort" "" "" || missing_items+=("sort")
-    check_command "uniq" "uniq" "" "" || missing_items+=("uniq")
-    check_command "pkill" "pkill" "" "" || missing_items+=("pkill")
+    # Check all tools and components
+    check_command "curl" "curl" "" && echo -e "${GREEN}✅ curl${NC}" || { echo -e "${RED}❌ curl${NC}"; missing_items+=("curl"); }
+    check_command "jq" "jq" "" && echo -e "${GREEN}✅ jq${NC}" || { echo -e "${RED}❌ jq${NC}"; missing_items+=("jq"); }
+    check_command "unzip" "unzip" "" && echo -e "${GREEN}✅ unzip${NC}" || { echo -e "${RED}❌ unzip${NC}"; missing_items+=("unzip"); }
+    check_command "timeout" "timeout" "" && echo -e "${GREEN}✅ timeout${NC}" || { echo -e "${RED}❌ timeout${NC}"; missing_items+=("timeout"); }
+    check_command "bc" "bc" "" && echo -e "${GREEN}✅ bc${NC}" || { echo -e "${RED}❌ bc${NC}"; missing_items+=("bc"); }
+    check_command "awk" "awk" "" && echo -e "${GREEN}✅ awk${NC}" || { echo -e "${RED}❌ awk${NC}"; missing_items+=("awk"); }
+    check_command "sed" "sed" "" && echo -e "${GREEN}✅ sed${NC}" || { echo -e "${RED}❌ sed${NC}"; missing_items+=("sed"); }
+    check_command "grep" "grep" "" && echo -e "${GREEN}✅ grep${NC}" || { echo -e "${RED}❌ grep${NC}"; missing_items+=("grep"); }
+    check_command "sort" "sort" "" && echo -e "${GREEN}✅ sort${NC}" || { echo -e "${RED}❌ sort${NC}"; missing_items+=("sort"); }
+    check_command "uniq" "uniq" "" && echo -e "${GREEN}✅ uniq${NC}" || { echo -e "${RED}❌ uniq${NC}"; missing_items+=("uniq"); }
+    check_command "pkill" "pkill" "" && echo -e "${GREEN}✅ pkill${NC}" || { echo -e "${RED}❌ pkill${NC}"; missing_items+=("pkill"); }
+    
+    # Check Docker functionality
+    if check_docker; then
+        echo -e "${GREEN}✅ docker${NC}"
+    else
+        echo -e "${RED}❌ docker${NC}"
+        failed_checks+=("docker")
+    fi
     
     # Check Kubernetes tools
-    check_command "kubectl" "kubectl" "" "install_kubectl \"$os\"" || missing_items+=("kubectl")
-    check_command "helm" "helm" "3.14" "install_helm \"$os\"" || failed_checks+=("helm")
+    check_command "kubectl" "kubectl" "" && echo -e "${GREEN}✅ kubectl${NC}" || { echo -e "${RED}❌ kubectl${NC}"; missing_items+=("kubectl"); }
+    check_command "helm" "helm" "3.14" && echo -e "${GREEN}✅ helm${NC}" || { echo -e "${RED}❌ helm${NC}"; failed_checks+=("helm"); }
     
     # Check Kubernetes connectivity (unless skipped)
     if [ "$SKIP_K8S" != true ]; then
-        if ! kubectl cluster-info &>/dev/null; then
+        if kubectl cluster-info &>/dev/null; then
+            echo -e "${GREEN}✅ k8s-connectivity${NC}"
+        else
+            echo -e "${RED}❌ k8s-connectivity${NC}"
             failed_checks+=("k8s-connectivity")
         fi
     fi
     
     # Check required files
-    if [ ! -f "preinstall-diagnostics.zip" ]; then
+    if [ -f "preinstall-diagnostics.zip" ]; then
+        echo -e "${GREEN}✅ preinstall-diagnostics.zip${NC}"
+    else
+        echo -e "${RED}❌ preinstall-diagnostics.zip${NC}"
         missing_items+=("preinstall-diagnostics.zip")
     fi
-    if [ ! -f "sanity-check.sh" ]; then
+    
+    if [ -f "sanity-check.sh" ]; then
+        echo -e "${GREEN}✅ sanity-check.sh${NC}"
+        # Check if it's executable
+        if [ -x "sanity-check.sh" ]; then
+            echo -e "  └─ Script is executable"
+        else
+            echo -e "${YELLOW}  └─ Making script executable...${NC}"
+            chmod +x sanity-check.sh
+        fi
+    else
+        echo -e "${RED}❌ sanity-check.sh${NC}"
         missing_items+=("sanity-check.sh")
     fi
     
-    # Show results
+
+    
+    # Show summary
+    echo -e "\n${BLUE}=== VALIDATION SUMMARY ===${NC}"
     if [ ${#missing_items[@]} -eq 0 ] && [ ${#failed_checks[@]} -eq 0 ]; then
         echo -e "${GREEN}✅ All prerequisites satisfied${NC}"
         return 0
@@ -357,24 +367,20 @@ validate_prerequisites() {
         if [ ${#failed_checks[@]} -gt 0 ]; then
             echo -e "${RED}❌ Failed: ${failed_checks[*]}${NC}"
         fi
-        if [ "$FIX_MODE" != true ]; then
-            echo -e "${YELLOW}Run with --fix to install missing components${NC}"
-        fi
+        
+        # Show installation instructions
+        echo -e "\n${YELLOW}=== INSTALLATION INSTRUCTIONS ===${NC}"
+        show_installation_instructions "$os" "${missing_items[@]}" "${failed_checks[@]}"
         return 1
     fi
 }
 
 # Parse command line arguments
-FIX_MODE=false
 SKIP_K8S=false
 VERBOSE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --fix)
-            FIX_MODE=true
-            shift
-            ;;
         --skip-k8s)
             SKIP_K8S=true
             shift

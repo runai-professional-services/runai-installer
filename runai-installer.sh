@@ -60,6 +60,7 @@ show_usage() {
     echo "  --file FILE            Air-gapped tar.gz file to extract (required with --air-gapped)"
     echo "  --registry URL         Registry URL for air-gapped installation (required with --air-gapped)"
     echo "  --registry-secret FILE Registry secret YAML file to apply (required with --air-gapped)"
+    echo "  --uninstall            Uninstall Run.ai completely from the cluster"
     echo ""
     echo "Examples:"
     echo "  # Using sslip.io (automatic DNS resolution)"
@@ -82,11 +83,19 @@ show_usage() {
     echo ""
     echo "  # Air-gapped installation (no --runai-version needed)"
     echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com --registry-secret /path/to/registry-secret.yaml"
+    echo ""
+    echo "  # Uninstall Run.ai completely"
+    echo "  $0 --uninstall"
     exit 1
 }
 
 # Function to validate required parameters
 validate_params() {
+    # Skip validation for uninstall mode
+    if [ "$UNINSTALL" = true ]; then
+        return 0
+    fi
+    
     if [ -z "$DNS_NAME" ]; then
         echo -e "${RED}Error: --dns is required${NC}"
         show_usage
@@ -154,6 +163,22 @@ load_env() {
     export GREEN YELLOW BLUE RED NC
     export LOGS_DIR LOG_FILE
     export TEMP_DIR="/tmp"
+    
+    # Initialize boolean flags (only if not already set)
+    UNINSTALL=${UNINSTALL:-false}
+    CLUSTER_ONLY=${CLUSTER_ONLY:-false}
+    INTERNAL_DNS=${INTERNAL_DNS:-false}
+    NO_CERT=${NO_CERT:-false}
+    INSTALL_KNATIVE=${INSTALL_KNATIVE:-false}
+    INSTALL_NGINX=${INSTALL_NGINX:-false}
+    PATCH_NGINX=${PATCH_NGINX:-false}
+    INSTALL_PROMETHEUS=${INSTALL_PROMETHEUS:-false}
+    INSTALL_GPU_OPERATOR=${INSTALL_GPU_OPERATOR:-false}
+    INSTALL_TRAINING=${INSTALL_TRAINING:-false}
+    INSTALL_LWS=${INSTALL_LWS:-false}
+    INSTALL_STORAGE_CLASS=${INSTALL_STORAGE_CLASS:-false}
+    BCM_CONFIG=${BCM_CONFIG:-false}
+    AIR_GAPPED_MODE=${AIR_GAPPED_MODE:-false}
 }
 
 # Function to log commands and their output
@@ -293,6 +318,10 @@ while [[ $# -gt 0 ]]; do
             BCM_CONFIG=true
             shift
             ;;
+        --uninstall)
+            UNINSTALL=true
+            shift
+            ;;
         -h|--help)
             show_usage
             ;;
@@ -303,8 +332,25 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Load environment and validate parameters
+# Load environment
 load_env
+
+# Handle uninstall if requested (before validation)
+if [ "$UNINSTALL" = true ]; then
+    echo -e "${BLUE}Uninstall mode requested...${NC}"
+    
+    # Check if the original uninstall script exists
+    if [ -f "./sanity-check/full-runai-delete.sh" ]; then
+        echo -e "${BLUE}Running full Run.ai uninstall script...${NC}"
+        bash ./sanity-check/full-runai-delete.sh
+        exit $?
+    else
+        echo -e "${RED}❌ Error: Full uninstall script not found at ./sanity-check/full-runai-delete.sh${NC}"
+        exit 1
+    fi
+fi
+
+# Validate parameters (only if not uninstalling)
 validate_params
 
 # Create namespaces first
@@ -328,8 +374,8 @@ if [ "$AIR_GAPPED_MODE" != true ]; then
     fi
 fi
 
-# Configure BCM early if requested
-if [ "$BCM_CONFIG" = true ]; then
+# Configure BCM early if requested (skip if in air-gapped mode - air-gapped handles its own BCM)
+if [ "$BCM_CONFIG" = true ] && [ "$AIR_GAPPED_MODE" != true ]; then
     echo -e "${BLUE}BCM configuration requested...${NC}"
     
     if [ ! -f "./modules/bcm.sh" ]; then

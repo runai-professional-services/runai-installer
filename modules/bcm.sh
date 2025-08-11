@@ -99,6 +99,11 @@ configure_bcm() {
     
     echo -e "${GREEN}✅ Using current node: $headnode${NC}"
     
+    # Log BCM configuration details
+    log_command "echo 'BCM Configuration - Current node: $headnode'" "BCM headnode configuration"
+    log_command "echo 'All headnodes: $all_headnodes'" "BCM headnode detection"
+    log_command "echo 'Headnode count: $headnode_count'" "BCM cluster mode detection"
+    
     # If other headnodes exist, provide manual commands
     if [ "$headnode_count" -gt 1 ]; then
         echo -e "${YELLOW}⚠️ Detected BCM cluster mode with $headnode_count headnodes${NC}"
@@ -108,19 +113,29 @@ configure_bcm() {
         done
         echo -e "${YELLOW}   Run this command on each additional headnode:${NC}"
         echo -e "${CYAN}     cmsh -c 'device use $other_headnode; roles; use nginx; nginxreverseproxy; add 443 $last_node $https_port \"runai\"; commit'${NC}"
+        
+        log_command "echo 'BCM cluster mode detected - additional headnodes need manual configuration'" "BCM cluster mode warning"
     fi
 
-    # Check if nginx reverse proxy entry already exists for port 443
+    # Check if nginx reverse proxy entry already exists for Run.ai on port 443
     echo -e "${BLUE}Checking for existing nginx reverse proxy entries...${NC}"
-    local existing_entries=$(cmsh -c "device use $headnode; roles; use nginx; nginxreverseproxy; list" 2>/dev/null | grep "443" || true)
+    local all_entries=$(cmsh -c "device use $headnode; roles; use nginx; nginxreverseproxy; list" 2>/dev/null || true)
+    local runai_entry=$(echo "$all_entries" | grep "443.*runai" || true)
     
-    if [ -n "$existing_entries" ]; then
-        echo -e "${YELLOW}⚠️ Nginx reverse proxy entry already exists for port 443${NC}"
+    log_command "cmsh -c 'device use $headnode; roles; use nginx; nginxreverseproxy; list'" "Check existing nginx reverse proxy entries"
+    
+    # Show all existing entries for information
+    if [ -n "$all_entries" ]; then
         echo -e "${YELLOW}   Existing entries:${NC}"
-        echo "$existing_entries" | while read -r entry; do
+        echo "$all_entries" | while read -r entry; do
             echo -e "${YELLOW}     $entry${NC}"
         done
-        echo -e "${GREEN}✅ Run.ai is already accessible via Bright Cluster Manager at https://$DNS_NAME${NC}"
+    fi
+    
+    # Check specifically for Run.ai entry
+    if [ -n "$runai_entry" ]; then
+        echo -e "${GREEN}✅ Run.ai nginx reverse proxy entry already exists${NC}"
+        log_command "echo 'Run.ai nginx reverse proxy entry already exists - skipping configuration'" "BCM Run.ai entry exists"
         return 0
     fi
     
@@ -135,8 +150,15 @@ add 443 $last_node $https_port 'runai'
 commit
 EOF
 
+    echo -e "${BLUE}BCM configuration commands:${NC}"
+    cat "$bcm_temp"
+    echo ""
+    
+    log_command "cat $bcm_temp" "BCM nginx configuration commands"
+    
     # Execute the cmsh commands from the file
-    if ! cmsh -q -x -f "$bcm_temp"; then
+    echo -e "${BLUE}Executing BCM nginx configuration...${NC}"
+    if ! log_command "cmsh -q -x -f $bcm_temp" "Execute BCM nginx configuration"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to add nginx reverse proxy entry${NC}"
         echo -e "${YELLOW}This might be due to an existing entry. Checking current configuration...${NC}"
         
@@ -155,8 +177,23 @@ EOF
         return 0
     fi
 
-    echo -e "${GREEN}✅ Successfully configured Bright Cluster Manager nginx reverse proxy${NC}"
-    echo -e "${GREEN}✅ Run.ai is now accessible via Bright Cluster Manager at https://$DNS_NAME${NC}"
+    # Verify the entry was added
+    echo -e "${BLUE}Verifying nginx reverse proxy entry was added...${NC}"
+    local updated_entries=$(cmsh -c "device use $headnode; roles; use nginx; nginxreverseproxy; list" 2>/dev/null || true)
+    local new_runai_entry=$(echo "$updated_entries" | grep "443.*runai" || true)
+    
+    if [ -n "$new_runai_entry" ]; then
+        echo -e "${GREEN}✅ Successfully configured Bright Cluster Manager nginx reverse proxy${NC}"
+        echo -e "${GREEN}✅ Run.ai entry found: $new_runai_entry${NC}"
+        echo -e "${GREEN}✅ Run.ai is now accessible via Bright Cluster Manager at https://$DNS_NAME${NC}"
+    else
+        echo -e "${RED}❌ Failed to add Run.ai nginx reverse proxy entry${NC}"
+        echo -e "${YELLOW}Current nginx reverse proxy entries:${NC}"
+        echo "$updated_entries" | while read -r entry; do
+            echo -e "${YELLOW}  $entry${NC}"
+        done
+        return 1
+    fi
 
     return 0
 } 
