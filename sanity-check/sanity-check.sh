@@ -3,8 +3,36 @@
 # Sanity Check Script - Modular Version
 # This script uses modules from the modules/ directory
 
-# Source common functions and variables
-source "$(dirname "$0")/modules/common.sh"
+# Color definitions for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+# Determine script directory robustly
+if [ -n "${BASH_SOURCE[0]}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+
+# Source module files
+if [ -f "$SCRIPT_DIR/modules/common.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/modules/common.sh"
+fi
+if [ -f "$SCRIPT_DIR/modules/hardware.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/modules/hardware.sh"
+fi
+if [ -f "$SCRIPT_DIR/modules/certificates.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/modules/certificates.sh"
+fi
+if [ -f "$SCRIPT_DIR/modules/storage.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/modules/storage.sh"
+fi
 
 # Create logs directory
 LOGS_DIR="./logs"
@@ -261,10 +289,10 @@ check_required_components() {
 
 
 # Source hardware module
-source "$(dirname "$0")/modules/hardware.sh"
+# source "$SCRIPT_DIR/modules/hardware.sh"
 
 # Source certificates module
-source "$(dirname "$0")/modules/certificates.sh"
+# source "$SCRIPT_DIR/modules/certificates.sh"
 
 # Function to check all nodes storage (replaces the old GPU-only function)
 check_all_nodes_storage() {
@@ -320,7 +348,7 @@ check_all_nodes_storage() {
 }
 
 # Source storage module
-source "$(dirname "$0")/modules/storage.sh"
+# source "$SCRIPT_DIR/modules/storage.sh"
 
 # Function to run TLS tests
 run_tls_tests() {
@@ -842,6 +870,36 @@ log_message() {
     fi
 }
 
+# Function to show usage information
+show_usage() {
+    echo -e "${YELLOW}Usage:${NC}"
+    echo -e "  sanity-check.sh [options]"
+    echo -e ""
+    echo -e "${YELLOW}Options:${NC}"
+    echo -e "  --cert FILE      Certificate file for TLS"
+    echo -e "  --key FILE       Private key file for TLS"
+    echo -e "  --dns NAME       DNS name for ingress"
+    echo -e "  --cacert FILE    CA certificate file (optional)"
+    echo -e "  --storage        Run storage tests only"
+    echo -e "  --class NAME     Specify storage class (optional)"
+    echo -e "  --hardware       Check hardware requirements only"
+    echo -e "  --disk           Check disk/ephemeral storage only"
+    echo -e "  --software       Check prerequisite software only"
+    echo -e "  --diag          Run preinstall diagnostics"
+    echo -e "  --diag-dns NAME  DNS name for diagnostics"
+    echo -e "  --prereq         Check prerequisite software"
+    echo -e "  --clean          Clean up all sanity-test namespaces (manual cleanup required)"
+    echo -e "  --silent        Suppress output messages"
+    echo -e "  -h, --help      Show this help message"
+    echo -e ""
+    echo -e "${YELLOW}Examples:${NC}"
+    echo -e "  ./sanity-check.sh --cert cert.pem --key key.pem --dns example.com"
+    echo -e "  ./sanity-check.sh --storage"
+    echo -e "  ./sanity-check.sh --hardware"
+    echo -e "  ./sanity-check.sh --diag --diag-dns example.com"
+    exit 1
+}
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -1000,7 +1058,7 @@ fi
 
 # Run software check if requested (early exit only if it's the only operation)
 if [ "$SOFTWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ -z "$CERT_FILE" ]; then
-    if ! bash "$(dirname "$0")/modules/validate-prereqs.sh"; then
+    if ! bash "$(dirname "$0")/validate-prereqs.sh"; then
         echo -e "${RED}❌ Software validation failed${NC}"
         exit 1
     fi
@@ -1035,7 +1093,7 @@ if [ "$HARDWARE_CHECK" = "true" ]; then
 fi
 
 if [ "$SOFTWARE_CHECK" = "true" ]; then
-    bash "$(dirname "$0")/modules/validate-prereqs.sh"
+    bash "$(dirname "$0")/validate-prereqs.sh"
     SOFTWARE_TEST_RESULT=$?
 fi
 

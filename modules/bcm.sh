@@ -134,9 +134,55 @@ configure_bcm() {
     
     # Check specifically for Run.ai entry
     if [ -n "$runai_entry" ]; then
-        echo -e "${GREEN}✅ Run.ai nginx reverse proxy entry already exists${NC}"
-        log_command "echo 'Run.ai nginx reverse proxy entry already exists - skipping configuration'" "BCM Run.ai entry exists"
-        return 0
+        echo -e "${BLUE}Run.ai nginx reverse proxy entry found. Validating...${NC}"
+        # Expected format example:
+        # 0      443    metal-server3    30443   'runai'
+        local entry_index existing_node existing_port
+        entry_index=$(echo "$runai_entry" | awk '{print $1}')
+        existing_node=$(echo "$runai_entry" | awk '{print $3}')
+        existing_port=$(echo "$runai_entry" | awk '{print $4}')
+
+        if [ -z "$entry_index" ] || [ -z "$existing_port" ]; then
+            echo -e "${YELLOW}⚠️ Could not parse existing Run.ai entry. Will attempt to add a corrected entry.${NC}"
+        elif [ "$existing_port" = "$https_port" ] && [ "$existing_node" = "$last_node" ]; then
+            echo -e "${GREEN}✅ Existing Run.ai entry is correct (node: $existing_node, port: $existing_port)${NC}"
+            log_command "echo 'Run.ai nginx reverse proxy entry is correct - nothing to change'" "BCM Run.ai entry validated"
+            return 0
+        else
+            echo -e "${YELLOW}⚠️ Existing Run.ai entry uses node '$existing_node' and port '$existing_port', but service exposes nodePort '$https_port' on node '$last_node'.${NC}"
+            echo -e "${BLUE}Updating BCM nginx reverse proxy entry to the correct nodePort...${NC}"
+
+            # Prepare an update script: delete the wrong entry by index, then add the correct one
+            local bcm_update="$TEMP_DIR/bcm-update-temp"
+            cat > "$bcm_update" << EOF
+device use $headnode
+roles
+use nginx
+nginxreverseproxy
+delete $entry_index
+add 443 $last_node $https_port 'runai'
+commit
+EOF
+
+            log_command "cat $bcm_update" "BCM nginx update commands"
+            if ! log_command "cmsh -q -x -f $bcm_update" "Execute BCM nginx update"; then
+                echo -e "${RED}❌ Failed to update nginx reverse proxy entry in BCM${NC}"
+                return 1
+            fi
+
+            # Re-list and confirm
+            local confirm_entries=$(cmsh -c "device use $headnode; roles; use nginx; nginxreverseproxy; list" 2>/dev/null || true)
+            local confirm_runai=$(echo "$confirm_entries" | grep "443.*runai" || true)
+            if echo "$confirm_runai" | awk '{print $3" "$4}' | grep -q "^$last_node $https_port$"; then
+                echo -e "${GREEN}✅ BCM nginx reverse proxy entry updated (node: $last_node, port: $https_port)${NC}"
+                return 0
+            else
+                echo -e "${RED}❌ BCM nginx reverse proxy entry did not update as expected${NC}"
+                echo -e "${YELLOW}Current entries:${NC}"
+                echo "$confirm_entries"
+                return 1
+            fi
+        fi
     fi
     
     # Create a temporary file with cmsh commands
