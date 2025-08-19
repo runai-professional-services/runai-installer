@@ -85,63 +85,23 @@ get_nginx_service_info() {
     local service_name=""
     local namespace=""
     
-    # First, try comprehensive search across ALL namespaces for any nginx/ingress service
-    echo -e "${BLUE}Searching for nginx ingress services across all namespaces...${NC}"
-    
-    # Method 1: Label-based detection (most reliable)
-    local labeled_match=$(kubectl get svc -A -l app.kubernetes.io/name=ingress-nginx --no-headers 2>/dev/null | head -1)
-    if [ -n "$labeled_match" ]; then
-        # Parse the output: NAMESPACE NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
-        local namespace=$(echo "$labeled_match" | awk '{print $1}')
-        local service_name=$(echo "$labeled_match" | awk '{print $2}')
-        
-        if [ -n "$namespace" ] && [ -n "$service_name" ]; then
-            echo -e "${GREEN}Found nginx service via labels: $service_name in namespace: $namespace${NC}"
-            echo "$service_name:$namespace"
-            return
-        fi
-    fi
-    
-    # Method 2: Search ALL namespaces for services with nginx/ingress in the name
-    local all_services=$(kubectl get svc -A --no-headers 2>/dev/null | grep -E "(ingress-nginx|nginx-ingress|nginx|ingress)" | grep -v admission | grep -v controller-admission | grep -v "kube-system" | head -5)
-    
-    if [ -n "$all_services" ]; then
-        echo -e "${BLUE}Found potential nginx services across namespaces:${NC}"
-        echo "$all_services" | while read -r line; do
-            echo -e "${YELLOW}  $line${NC}"
-        done
-        
-        # Take the first one that looks like a main nginx service
-        local first_service=$(echo "$all_services" | head -1)
-        local ns=$(echo "$first_service" | awk '{print $1}')
-        local svc=$(echo "$first_service" | awk '{print $2}')
-        
-        if [ -n "$ns" ] && [ -n "$svc" ]; then
-            echo -e "${GREEN}Selected service: $svc in namespace: $ns${NC}"
-            echo "$svc:$ns"
-            return
-        fi
-    fi
-    
-    # Method 3: Fallback to common namespaces with exact matches
-    for ns in "ingress-nginx" "nginx-ingress" "default" "kube-system"; do
-        # Try exact matches for common service names
-        for name in "ingress-nginx-controller" "ingress-nginx" "nginx-ingress-controller" "nginx-ingress" "nginx" "ingress"; do
+    # Try to find nginx ingress controller in different namespaces
+    for ns in "ingress-nginx" "nginx-ingress" "kube-system"; do
+        # First try exact matches
+        for name in "ingress-nginx-controller" "ingress-nginx" "nginx-ingress-controller" "nginx-ingress"; do
             if kubectl get svc -n "$ns" "$name" &> /dev/null; then
                 service_name="$name"
                 namespace="$ns"
-                echo -e "${GREEN}Found nginx service via namespace search: $name in $ns${NC}"
                 break 2
             fi
         done
         
         # If no exact match, try pattern matching for services with random suffixes
         if [ -z "$service_name" ]; then
-            local pattern_matches=$(kubectl get svc -n "$ns" --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | grep -E "^(ingress-nginx|nginx-ingress|nginx|ingress)(|-.+)$" | grep -v admission | grep -v controller-admission | head -1)
+            local pattern_matches=$(kubectl get svc -n "$ns" --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null | grep -E "(ingress-nginx-controller|nginx-ingress-ingress-nginx-controller)" | head -1)
             if [ -n "$pattern_matches" ]; then
                 service_name="$pattern_matches"
                 namespace="$ns"
-                echo -e "${GREEN}Found nginx service via pattern matching: $pattern_matches in $ns${NC}"
                 break
             fi
         fi
@@ -172,6 +132,10 @@ patch_nginx_service() {
     local service_info=$(get_nginx_service_info)
     local service_name=$(echo "$service_info" | cut -d: -f1)
     local namespace=$(echo "$service_info" | cut -d: -f2)
+    
+
+    
+
     
     if [ -z "$service_name" ] || [ -z "$namespace" ]; then
         echo -e "${RED}❌ Error: Could not find nginx ingress controller service${NC}"
