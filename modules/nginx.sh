@@ -89,11 +89,17 @@ get_nginx_service_info() {
     echo -e "${BLUE}Searching for nginx ingress services across all namespaces...${NC}"
     
     # Method 1: Label-based detection (most reliable)
-    local labeled_match=$(kubectl get svc -A -l app.kubernetes.io/name=ingress-nginx --no-headers 2>/dev/null | awk 'NR==1 {print $2 ":" $1}' | tr -d ' ')
+    local labeled_match=$(kubectl get svc -A -l app.kubernetes.io/name=ingress-nginx --no-headers 2>/dev/null | head -1)
     if [ -n "$labeled_match" ]; then
-        echo -e "${GREEN}Found nginx service via labels: $labeled_match${NC}"
-        echo "$labeled_match"
-        return
+        # Parse the output: NAMESPACE NAME TYPE CLUSTER-IP EXTERNAL-IP PORT(S) AGE
+        local namespace=$(echo "$labeled_match" | awk '{print $1}')
+        local service_name=$(echo "$labeled_match" | awk '{print $2}')
+        
+        if [ -n "$namespace" ] && [ -n "$service_name" ]; then
+            echo -e "${GREEN}Found nginx service via labels: $service_name in namespace: $namespace${NC}"
+            echo "$service_name:$namespace"
+            return
+        fi
     fi
     
     # Method 2: Search ALL namespaces for services with nginx/ingress in the name
