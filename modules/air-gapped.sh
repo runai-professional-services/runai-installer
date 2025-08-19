@@ -27,10 +27,7 @@ handle_air_gapped() {
         return 1
     fi
     
-    if [ -z "$REGISTRY_SECRET_FILE" ]; then
-        echo -e "${RED}❌ Error: --registry-secret is required for air-gapped installation${NC}"
-        return 1
-    fi
+    # --registry-secret is optional
     
     # Handle certificate setup if not using --no-cert
     if [ "$NO_CERT" != true ]; then
@@ -92,8 +89,8 @@ handle_air_gapped() {
         return 1
     fi
     
-    # Check if the registry secret file exists
-    if [ ! -f "$REGISTRY_SECRET_FILE" ]; then
+    # If a registry secret file was provided, validate its presence
+    if [ -n "$REGISTRY_SECRET_FILE" ] && [ ! -f "$REGISTRY_SECRET_FILE" ]; then
         echo -e "${RED}❌ Error: Registry secret file not found: $REGISTRY_SECRET_FILE${NC}"
         return 1
     fi
@@ -156,23 +153,29 @@ handle_air_gapped() {
     echo -e "${GREEN}✅ Air-gapped file extracted successfully${NC}"
     
     # Apply registry secret to runai namespace
-    echo -e "${BLUE}Applying registry secret to runai namespace...${NC}"
-    
-    if ! log_command "kubectl apply -f $REGISTRY_SECRET_FILE -n runai" "Apply registry secret to runai namespace"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to apply registry secret to runai namespace${NC}"
-        echo -e "${YELLOW}⚠️ Continuing installation anyway...${NC}"
+    if [ -n "$REGISTRY_SECRET_FILE" ]; then
+        echo -e "${BLUE}Applying registry secret to runai namespace...${NC}"
+        if ! log_command "kubectl apply -f $REGISTRY_SECRET_FILE -n runai" "Apply registry secret to runai namespace"; then
+            echo -e "${YELLOW}⚠️ Warning: Failed to apply registry secret to runai namespace${NC}"
+            echo -e "${YELLOW}⚠️ Continuing installation anyway...${NC}"
+        else
+            echo -e "${GREEN}✅ Registry secret applied to runai namespace successfully${NC}"
+        fi
     else
-        echo -e "${GREEN}✅ Registry secret applied to runai namespace successfully${NC}"
+        echo -e "${BLUE}No registry secret provided. Skipping secret application to runai namespace.${NC}"
     fi
     
     # Apply registry secret to runai-backend namespace
-    echo -e "${BLUE}Applying registry secret to runai-backend namespace...${NC}"
-    
-    if ! log_command "kubectl apply -f $REGISTRY_SECRET_FILE -n runai-backend" "Apply registry secret to runai-backend namespace"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to apply registry secret to runai-backend namespace${NC}"
-        echo -e "${YELLOW}⚠️ Continuing installation anyway...${NC}"
+    if [ -n "$REGISTRY_SECRET_FILE" ]; then
+        echo -e "${BLUE}Applying registry secret to runai-backend namespace...${NC}"
+        if ! log_command "kubectl apply -f $REGISTRY_SECRET_FILE -n runai-backend" "Apply registry secret to runai-backend namespace"; then
+            echo -e "${YELLOW}⚠️ Warning: Failed to apply registry secret to runai-backend namespace${NC}"
+            echo -e "${YELLOW}⚠️ Continuing installation anyway...${NC}"
+        else
+            echo -e "${GREEN}✅ Registry secret applied to runai-backend namespace successfully${NC}"
+        fi
     else
-        echo -e "${GREEN}✅ Registry secret applied to runai-backend namespace successfully${NC}"
+        echo -e "${BLUE}No registry secret provided. Skipping secret application to runai-backend namespace.${NC}"
     fi
     
     # Export registry URL and domain

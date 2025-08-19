@@ -59,7 +59,7 @@ show_usage() {
     echo "  --air-gapped           Enable air-gapped installation mode"
     echo "  --file FILE            Air-gapped tar.gz file to extract (required with --air-gapped)"
     echo "  --registry URL         Registry URL for air-gapped installation (required with --air-gapped)"
-    echo "  --registry-secret FILE Registry secret YAML file to apply (required with --air-gapped)"
+    echo "  --registry-secret FILE Registry secret YAML file to apply (optional in --air-gapped mode)"
     echo "  --uninstall            Uninstall Run.ai completely from the cluster"
     echo ""
     echo "Examples:"
@@ -82,7 +82,7 @@ show_usage() {
     echo "  $0 --dns 192.168.0.100.sslip.io --ip 192.168.0.214 --patch-nginx --repo-secret /root/jfrog"
     echo ""
     echo "  # Air-gapped installation (no --runai-version needed)"
-    echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com --registry-secret /path/to/registry-secret.yaml"
+    echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com"
     echo ""
     echo "  # Uninstall Run.ai completely"
     echo "  $0 --uninstall"
@@ -139,10 +139,7 @@ validate_params() {
             show_usage
         fi
         
-        if [ -z "$REGISTRY_SECRET_FILE" ]; then
-            echo -e "${RED}Error: --registry-secret is required when using --air-gapped${NC}"
-            show_usage
-        fi
+        # --registry-secret is optional in air-gapped mode
     fi
 }
 
