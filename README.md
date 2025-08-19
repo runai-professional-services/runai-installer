@@ -35,26 +35,28 @@ The following fields are always required:
 
 ### Basic Installation Example
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 2.20.22 --repo-secret ./license.yaml
+one-click-installer.sh --dns runai.example.com --runai-version 2.22.20 --repo-secret ./license.yaml
+one-click-installer.sh --dns 192.168.0.100.sslip.io --runai-version 2.22.20 --repo-secret ./license.yaml
+
 ```
 
 ### Installation with Internal DNS
 ```sh
 # Note: --internal-dns requires --ip
-one-click-installer.sh --dns runai.example.com --runai-version 	2.21.37 \
+one-click-installer.sh --dns runai.example.com --runai-version 	2.22.20 \
   --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
 
 ### Installation with Custom Certificates
 ```sh
 # Note: --cert requires --key
-one-click-installer.sh --dns runai.example.com --runai-version 	2.21.37 \
+one-click-installer.sh --dns runai.example.com --runai-version 	2.22.20 \
   --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret ./license.yaml
 ```
 
 ### Full Installation with All Components
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 	2.21.37 \
+one-click-installer.sh --dns runai.example.com --runai-version 	2.22.20 \
   --nginx --prometheus --gpu-operator --knative \
   --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
