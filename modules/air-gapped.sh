@@ -424,6 +424,9 @@ handle_air_gapped() {
         sleep 5
     done
     
+    # Disable external authentication for air-gapped environment
+    kubectl patch RunaiConfig runai -n runai --type="merge" -p '{"spec":{"workload-controller":{"externalAuthUrlEnabled": false}}}'
+    
     echo -e "${GREEN}✅ Air-gapped installation completed successfully${NC}"
     
     # Return to original directory for additional installations
