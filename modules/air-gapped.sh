@@ -4,6 +4,62 @@
 handle_air_gapped() {
     echo -e "${BLUE}Starting air-gapped installation...${NC}"
     
+    # Function to create custom-env.yaml based on registry
+    create_custom_env_file() {
+        local registry_url="$REGISTRY_URL"
+        local custom_env_file="custom-env.yaml"
+        
+        echo -e "${BLUE}Creating $custom_env_file with registry: $registry_url${NC}"
+        
+        cat > "$custom_env_file" << EOF
+global:
+  imageRegistry: $registry_url
+  image:
+    registry: $registry_url
+backend:
+  config:
+    privateRegistryAddress: $registry_url
+    clusterInstallation:
+      helmRegistryUrl: ""
+postgresql:
+  image:
+    repository: postgresql
+thanos:
+  image:
+    repository: thanos
+redisQueue:
+  image:
+    repository: keydb
+redisCache:
+  image:
+    repository: keydb
+nats:
+  image:
+    repository: nats
+grafana:
+  proxy:
+    image:
+      repository: $registry_url/grafana-proxy
+  image:
+    repository: $registry_url/grafana
+  testFramework:
+    image: $registry_url/bats/bats
+clusterService:
+  config:
+    clusterInstallation:
+      helmRegistryUrl: ""
+notificationsService:
+  image:
+    registry: $registry_url
+keycloakx:
+  image:
+    repository: $registry_url/keycloak
+EOF
+        
+        echo -e "${GREEN}✅ Created $custom_env_file successfully${NC}"
+        echo "Created custom-env.yaml with registry: $registry_url" >> "$LOG_FILE"
+    }
+    
     # Ensure Docker is installed and running
     echo -e "${BLUE}Checking Docker availability...${NC}"
     if ! command -v docker >/dev/null 2>&1; then
@@ -152,10 +208,30 @@ handle_air_gapped() {
     
     echo -e "${GREEN}✅ Air-gapped file extracted successfully${NC}"
     
+    # Create custom-env.yaml based on registry flag
+    echo -e "${BLUE}Creating custom-env.yaml with registry: $REGISTRY_URL${NC}"
+    create_custom_env_file
+    
+    # Log skip-upload status
+    if [ "$SKIP_UPLOAD" = true ]; then
+        echo "Skip Upload Mode: Enabled - Images already in registry" >> "$LOG_FILE"
+    else
+        echo "Skip Upload Mode: Disabled - Will upload images to registry" >> "$LOG_FILE"
+    fi
+    
     # Apply registry secret to runai namespace
     if [ -n "$REGISTRY_SECRET_FILE" ]; then
         echo -e "${BLUE}Applying registry secret to runai namespace...${NC}"
-        if ! log_command "kubectl apply -f $REGISTRY_SECRET_FILE -n runai" "Apply registry secret to runai namespace"; then
+        # Use absolute path or copy file to current directory
+        if [[ "$REGISTRY_SECRET_FILE" == /* ]]; then
+            # Absolute path
+            secret_file="$REGISTRY_SECRET_FILE"
+        else
+            # Relative path - copy to air-gapped directory
+            secret_file="$ORIGINAL_DIR/$REGISTRY_SECRET_FILE"
+        fi
+        
+        if ! log_command "kubectl apply -f $secret_file -n runai" "Apply registry secret to runai namespace"; then
             echo -e "${YELLOW}⚠️ Warning: Failed to apply registry secret to runai namespace${NC}"
             echo -e "${YELLOW}⚠️ Continuing installation anyway...${NC}"
         else
@@ -168,7 +244,16 @@ handle_air_gapped() {
     # Apply registry secret to runai-backend namespace
     if [ -n "$REGISTRY_SECRET_FILE" ]; then
         echo -e "${BLUE}Applying registry secret to runai-backend namespace...${NC}"
-        if ! log_command "kubectl apply -f $REGISTRY_SECRET_FILE -n runai-backend" "Apply registry secret to runai-backend namespace"; then
+        # Use absolute path or copy file to current directory
+        if [[ "$REGISTRY_SECRET_FILE" == /* ]]; then
+            # Absolute path
+            secret_file="$REGISTRY_SECRET_FILE"
+        else
+            # Relative path - copy to air-gapped directory
+            secret_file="$ORIGINAL_DIR/$REGISTRY_SECRET_FILE"
+        fi
+        
+        if ! log_command "kubectl apply -f $secret_file -n runai-backend" "Apply registry secret to runai-backend namespace"; then
             echo -e "${YELLOW}⚠️ Warning: Failed to apply registry secret to runai-backend namespace${NC}"
             echo -e "${YELLOW}⚠️ Continuing installation anyway...${NC}"
         else
@@ -196,12 +281,26 @@ handle_air_gapped() {
     echo -e "${BLUE}Running setup.sh from air-gapped directory...${NC}"
     
     # Run setup.sh directly to show progress in real-time
-    if ! ./setup.sh; then
-        echo -e "${RED}❌ Error: Failed to run setup.sh${NC}"
-        return 1
+    if [ "$SKIP_UPLOAD" = true ]; then
+        echo -e "${BLUE}Skipping image uploads (--skip-upload flag used)${NC}"
+        echo "Skipping image uploads due to --skip-upload flag" >> "$LOG_FILE"
+        
+        # Create a dummy setup.sh that skips uploads
+        cat > setup-skip-upload.sh << 'EOF'
+#!/bin/bash
+echo "Skipping image uploads - images already in registry"
+echo "Proceeding directly to installation..."
+EOF
+        chmod +x setup-skip-upload.sh
+        ./setup-skip-upload.sh
+    else
+        # Run the original setup.sh for image uploads
+        if ! ./setup.sh; then
+            echo -e "${RED}❌ Error: Failed to run setup.sh${NC}"
+            return 1
+        fi
+        echo -e "${GREEN}✅ All files uploaded successfully${NC}"
     fi
-    
-    echo -e "${GREEN}✅ All files uploaded successfully${NC}"
     
     # Install Run.ai backend using helm
     echo -e "${BLUE}Installing Run.ai backend...${NC}"

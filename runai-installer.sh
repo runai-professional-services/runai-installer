@@ -60,6 +60,7 @@ show_usage() {
     echo "  --file FILE            Air-gapped tar.gz file to extract (required with --air-gapped)"
     echo "  --registry URL         Registry URL for air-gapped installation (required with --air-gapped)"
     echo "  --registry-secret FILE Registry secret YAML file to apply (optional in --air-gapped mode)"
+    echo "  --skip-upload          Skip image uploads when images are already in registry (air-gapped mode)"
     echo "  --uninstall            Uninstall Run.ai completely from the cluster"
     echo ""
     echo "Examples:"
@@ -83,6 +84,8 @@ show_usage() {
     echo ""
     echo "  # Air-gapped installation (no --runai-version needed)"
     echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com"
+    echo "  # Air-gapped installation with skip-upload (images already in registry)"
+    echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com --skip-upload"
     echo ""
     echo "  # Uninstall Run.ai completely"
     echo "  $0 --uninstall"
@@ -176,6 +179,8 @@ load_env() {
     INSTALL_STORAGE_CLASS=${INSTALL_STORAGE_CLASS:-false}
     BCM_CONFIG=${BCM_CONFIG:-false}
     AIR_GAPPED_MODE=${AIR_GAPPED_MODE:-false}
+    SKIP_UPLOAD=${SKIP_UPLOAD:-false}
+    AIR_GAPPED_FILE=${AIR_GAPPED_FILE:-}
 }
 
 # Function to log commands and their output
@@ -310,6 +315,10 @@ while [[ $# -gt 0 ]]; do
         --registry-secret)
             REGISTRY_SECRET_FILE="$2"
             shift 2
+            ;;
+        --skip-upload)
+            SKIP_UPLOAD=true
+            shift
             ;;
         --BCM)
             BCM_CONFIG=true
@@ -498,6 +507,7 @@ if [ "$AIR_GAPPED_MODE" = true ]; then
     echo -e "Air-gapped File: $([ -n "$AIR_GAPPED_FILE" ] && echo "$AIR_GAPPED_FILE" || echo "None")"
     echo -e "Registry URL: $([ -n "$REGISTRY_URL" ] && echo "$REGISTRY_URL" || echo "None")"
     echo -e "Registry Secret: $([ -n "$REGISTRY_SECRET_FILE" ] && echo "$REGISTRY_SECRET_FILE" || echo "None")"
+    echo -e "Skip Upload: $([ "$SKIP_UPLOAD" = true ] && echo "Yes" || echo "No")"
 fi
 
 # Final success message
