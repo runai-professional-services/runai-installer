@@ -269,14 +269,18 @@ EOF
     echo -e "${BLUE}Setting domain: $DNS_NAME${NC}"
     export DOMAIN="$DNS_NAME"
     
-    # Check if setup.sh exists
-    if [ ! -f "./setup.sh" ]; then
-        echo -e "${RED}❌ Error: setup.sh not found in air-gapped directory${NC}"
-        return 1
+    # Check if setup.sh exists (only if not skipping uploads)
+    if [ "$SKIP_UPLOAD" != true ]; then
+        if [ ! -f "./setup.sh" ]; then
+            echo -e "${RED}❌ Error: setup.sh not found in air-gapped directory${NC}"
+            return 1
+        fi
+        
+        # Make setup.sh executable
+        chmod +x ./setup.sh
+    else
+        echo -e "${BLUE}Skipping setup.sh check (--skip-upload flag used)${NC}"
     fi
-    
-    # Make setup.sh executable
-    chmod +x ./setup.sh
     
     echo -e "${BLUE}Running setup.sh from air-gapped directory...${NC}"
     
