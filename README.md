@@ -1,4 +1,4 @@
-# 🚀 Run.ai One-Click Installer
+# 🚀 Run.ai Installer
 
 ![Run.ai](https://img.shields.io/badge/AI%20Factory-Installation%20Wizard-blue)
 ![Run.ai](https://img.shields.io/badge/Run.ai-Automation-green)
@@ -6,7 +6,7 @@
 
 ## 🌟 Overview
 
-The Run.ai One-Click Installer is a powerful bash script that automates the deployment of Run.ai on Kubernetes clusters. This tool simplifies what would otherwise be a complex, multi-step installation process into a single command with customizable options.
+The Run.ai Installer is a powerful bash script that automates the deployment of Run.ai on Kubernetes clusters. This tool simplifies what would otherwise be a complex, multi-step installation process into a single command with customizable options.
 
 ## ✨ Features
 
@@ -35,28 +35,27 @@ The following fields are always required:
 
 ### Basic Installation Example
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 2.22.20 --repo-secret ./license.yaml
-one-click-installer.sh --dns 192.168.0.100.sslip.io --runai-version 2.22.20 --repo-secret ./license.yaml
-
+./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 --repo-secret ./license.yaml
+./runai-installer.sh --dns 192.168.0.100.sslip.io --runai-version 2.22.47 --repo-secret ./license.yaml
 ```
 
 ### Installation with Internal DNS
 ```sh
 # Note: --internal-dns requires --ip
-one-click-installer.sh --dns runai.example.com --runai-version 	2.22.20 \
+./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
   --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
 
 ### Installation with Custom Certificates
 ```sh
 # Note: --cert requires --key
-one-click-installer.sh --dns runai.example.com --runai-version 	2.22.20 \
+./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
   --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret ./license.yaml
 ```
 
 ### Full Installation with All Components
 ```sh
-one-click-installer.sh --dns runai.example.com --runai-version 	2.22.20 \
+./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
   --nginx --prometheus --gpu-operator --knative \
   --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
@@ -65,7 +64,7 @@ one-click-installer.sh --dns runai.example.com --runai-version 	2.22.20 \
 ```sh
 # Format: <name>.<ip-address>.sslip.io
 # Example using IP 192.168.0.200:
-one-click-installer.sh --dns 192.168.0.200.sslip.io --runai-versio 	2.21.37 \
+./runai-installer.sh --dns 192.168.0.200.sslip.io --runai-version 2.22.47 \
   --nginx --prometheus --gpu-operator --knative --BCM \
   --ip 192.168.0.200 --repo-secret ./license.yaml 
 ```
@@ -73,7 +72,7 @@ one-click-installer.sh --dns 192.168.0.200.sslip.io --runai-versio 	2.21.37 \
 ### Patch Existing Nginx Installation
 ```sh
 # Note: --patch-nginx requires --ip
-one-click-installer.sh --dns runai.example.com --ip 192.168.0.200 --patch-nginx --repo-secret ./license.yaml
+./runai-installer.sh --dns runai.example.com --ip 192.168.0.200 --patch-nginx --repo-secret ./license.yaml
 ```
 
 ## 📋 Options
@@ -92,7 +91,7 @@ one-click-installer.sh --dns runai.example.com --ip 192.168.0.200 --patch-nginx 
 | `--prometheus` | Install Prometheus Stack |
 | `--gpu-operator` | Install NVIDIA GPU Operator |
 | `--repo-secret FILE` | Specify repository secret file location |
-| `--bcm` | Configure Bright Cluster Manager for Run.ai access |
+| `--BCM` | Configure Bright Cluster Manager for Run.ai access |
 
 ## 🔍 Prerequisites
 
@@ -117,7 +116,7 @@ one-click-installer.sh --dns runai.example.com --ip 192.168.0.200 --patch-nginx 
 
 After installation, you can access Run.ai at:
 - URL: `https://YOUR_DNS_NAME`
-- Default credentials: `test@run.ai` / `XXX'
+- Default credentials: `test@run.ai` / `XXX`
 
 ## 🤝 Contributing
 
