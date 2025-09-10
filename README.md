@@ -41,6 +41,7 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 ## 🔍 Prerequisites
 
 ### For Run.ai Installation
+- A license file from NVIDIA 
 - Kubernetes cluster (or use our Kubernetes installer)
 - `kubectl` configured to access your cluster
 - `helm` installed
