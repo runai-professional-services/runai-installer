@@ -178,6 +178,34 @@ main() {
         echo -e "${YELLOW}⚠️ Verification failed, but artifacts were created. Check inputs and try again.${NC}"
     fi
 
+    # Check Subject Alternative Names
+    echo -e "${BLUE}Checking Subject Alternative Names...${NC}"
+    local san_output
+    san_output=$(openssl x509 -in "$svc_crt" -text -noout | grep -A 5 "Subject Alternative Name" 2>/dev/null || echo "")
+    if [[ -n "$san_output" ]]; then
+        echo -e "${GREEN}✅ Subject Alternative Names found:${NC}"
+        echo "$san_output" | sed 's/^/  /'
+        
+        # Verify all requested DNS names are present
+        local missing_names=()
+        for name in "${names[@]}"; do
+            if ! echo "$san_output" | grep -q "DNS:${name}"; then
+                missing_names+=("$name")
+            fi
+        done
+        
+        if [[ ${#missing_names[@]} -gt 0 ]]; then
+            echo -e "${RED}❌ Warning: The following DNS names were not found in the certificate:${NC}"
+            for name in "${missing_names[@]}"; do
+                echo -e "${RED}  - $name${NC}"
+            done
+        else
+            echo -e "${GREEN}✅ All requested DNS names are present in the certificate${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ No Subject Alternative Names found in certificate${NC}"
+    fi
+
     # Hostname verification tests (optional)
     if [[ "$run_tests" == true ]]; then
         echo -e "${BLUE}Running hostname verification tests...${NC}"
