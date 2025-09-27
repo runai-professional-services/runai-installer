@@ -33,12 +33,37 @@ echo "Script path: $0"
 echo "Current directory: $(pwd)"
 echo "Arguments: $@"
 
+# Function to get latest Run.ai version
+get_latest_runai_version() {
+    # Add the helm repo if not already added
+    if ! log_command "helm repo add runai-backend https://runai.jfrog.io/artifactory/cp-charts-prod" "Add Run.ai backend Helm repo"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to add runai-backend helm repo, continuing...${NC}"
+    fi
+    
+    # Update helm repos
+    if ! log_command "helm repo update > /dev/null 2>&1" "Update Helm repos"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to update helm repos, continuing...${NC}"
+    fi
+    
+    # Get the latest version from helm search
+    local latest_version=$(helm search repo runai-backend --output json | jq -r '.[0].version' 2>/dev/null)
+    
+    if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
+        echo -e "${RED}❌ Error: Could not detect latest Run.ai version${NC}"
+        return 1
+    fi
+    
+    # Return only the version number (no echo to stdout)
+    printf "%s" "$latest_version"
+    return 0
+}
+
 # Function to show usage
 show_usage() {
     echo -e "${BLUE}Usage: $0 [OPTIONS]${NC}"
     echo "Options:"
     echo "  --dns DNS_NAME         Specify DNS name for Run.ai certificates"
-    echo "  --runai-version VER    Specify Run.ai version to install"
+    echo "  --runai-version VER    Specify Run.ai version to install (use 'latest' for newest version)"
     echo "  --cluster-only         Skip backend installation and only install Run.ai cluster"
     echo "  --internal-dns         Configure internal DNS (requires --ip)"
     echo "  --ip IP_ADDRESS        Required if --internal-dns or --patch-nginx is set"
@@ -108,6 +133,17 @@ validate_params() {
     if [ "$AIR_GAPPED_MODE" != true ] && [ -z "$RUNAI_VERSION" ]; then
         echo -e "${RED}Error: --runai-version is required (unless using --air-gapped mode)${NC}"
         show_usage
+    fi
+    
+    # Handle "latest" version option
+    if [ "$RUNAI_VERSION" = "latest" ]; then
+        echo -e "${BLUE}Latest version requested, detecting latest available version...${NC}"
+        RUNAI_VERSION=$(get_latest_runai_version)
+        if [ $? -ne 0 ]; then
+            echo -e "${RED}❌ Failed to detect latest version${NC}"
+            exit 1
+        fi
+        echo -e "${GREEN}✅ Latest Run.ai version detected: $RUNAI_VERSION${NC}"
     fi
 
     if [ "$INTERNAL_DNS" = true ] && [ -z "$IP_ADDRESS" ]; then
