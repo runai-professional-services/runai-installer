@@ -513,6 +513,14 @@ EOF
         return 1
     fi
     
+    # Label the Run.ai CA certificate secret
+    echo -e "${BLUE}Labeling Run.ai CA certificate secret...${NC}"
+    if log_command "kubectl label secret runai-ca-cert -n runai run.ai/cluster-wide=true run.ai/name=runai-ca-cert --overwrite" "Label Run.ai CA certificate secret"; then
+        echo -e "${GREEN}✅ Run.ai CA certificate secret labeled successfully${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Warning: Failed to label Run.ai CA certificate secret, continuing...${NC}"
+    fi
+    
     # Wait for cluster pods to be ready
     echo -e "${BLUE}Waiting for Run.ai cluster pods to be ready...${NC}"
     while true; do

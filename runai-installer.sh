@@ -71,7 +71,7 @@ show_usage() {
     echo "  $0 --dns kirson.runai.lab --internal-dns --ip 172.21.140.20 --runai-version 2.20.22 --repo-secret /root/jfrog"
     echo ""
     echo "  # Using custom certificates"
-    echo "  $0 --dns kirson.runai.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret /root/jfrog"
+    echo "  $0 --dns kirson.rudnai.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret /root/jfrog"
     echo ""
     echo "  # Using custom certificates with CA cert"
     echo "  $0 --dns kirson.runai.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem --repo-secret /root/jfrog"
@@ -454,6 +454,19 @@ fi
 source ./modules/knative.sh
 if [ "$INSTALL_KNATIVE" = true ]; then
     install_knative
+fi
+
+# Handle Run.ai node labeling before any installations
+echo -e "${BLUE}Configuring Run.ai node roles...${NC}"
+if [ -f "./modules/node-labeling.sh" ]; then
+    source ./modules/node-labeling.sh
+    if handle_runai_node_labeling; then
+        echo -e "${GREEN}✅ Run.ai node labeling completed successfully${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Run.ai node labeling completed with warnings${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️ Node labeling module not found - skipping node labeling${NC}"
 fi
 
 source ./modules/air-gapped.sh
