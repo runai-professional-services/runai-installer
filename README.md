@@ -32,10 +32,12 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 - 🌐 **DNS Configuration**: Sets up internal DNS and patches CoreDNS
 - 🚦 **Ingress Control**: Installs and configures Nginx Ingress Controller
 - 📊 **Monitoring**: Optional Prometheus Stack installation
-- 🖥️ **GPU Support**: Optional NVIDIA GPU Operator installation
-- 🚀 **Serverless**: Optional Knative serving installation
+- 🖥️ **GPU Support**: Optional NVIDIA GPU Operator installation with enhanced detection
+- 🚀 **Serverless**: Optional Knative serving installation with auto-scaling
 - 🔧 **BCM Integration**: Optional Bright Cluster Manager configuration
 - 🏭 **Air-gapped Support**: Complete offline installation capabilities
+- 🌐 **Subdomain Support**: Wildcard ingress for unique workload URLs
+- 📦 **Prerequisites-Only Mode**: Install infrastructure components without Run.ai
 - 🛠️ **Kubernetes Cluster Setup**: Full Kubernetes installation using Kubespray (optional)
 
 ## 🔍 Prerequisites
@@ -57,7 +59,7 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 
 ### Required Parameters
 - `--dns`: DNS name for Run.ai access
-- `--runai-version`: Run.ai version to install
+- `--runai-version`: Run.ai version to install (use `latest` to auto-detect newest version)
 - `--repo-secret`: Path to your Run.ai license file
 
 ### Option Dependencies
@@ -72,7 +74,7 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 | Option | Description | Required |
 |--------|-------------|----------|
 | `--dns DNS_NAME` | DNS name for Run.ai certificates | ✅ |
-| `--runai-version VER` | Run.ai version to install | ✅ |
+| `--runai-version VER` | Run.ai version to install (use `latest` for newest) | ✅ |
 | `--repo-secret FILE` | Repository secret file location | ✅ |
 | `--cluster-only` | Skip backend, install cluster only | ❌ |
 | `--internal-dns` | Configure internal DNS | ❌ |
@@ -95,6 +97,8 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 | `--registry URL` | Registry URL for air-gapped installation | ❌ |
 | `--registry-secret FILE` | Registry secret YAML file | ❌ |
 | `--skip-upload` | Skip image uploads (air-gapped mode) | ❌ |
+| `--subdomain` | Enable subdomain support with wildcard ingress | ❌ |
+| `--install-only` | Install prerequisites only (no Run.ai) | ❌ |
 | `--uninstall` | Uninstall Run.ai completely | ❌ |
 
 ## 📝 Examples
@@ -104,6 +108,11 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 **Using sslip.io (automatic DNS resolution):**
 ```sh
 ./runai-installer.sh --dns 192.168.0.100.sslip.io --runai-version 2.22.47 --repo-secret ./license.yaml
+```
+
+**Using latest Run.ai version:**
+```sh
+./runai-installer.sh --dns runai.example.com --runai-version latest --repo-secret ./license.yaml
 ```
 
 **Using custom domain:**
@@ -146,6 +155,18 @@ This simplifies what would otherwise be a complex, multi-step installation proce
   --ip 192.168.0.200 --repo-secret ./license.yaml
 ```
 
+**Subdomain support (workload URLs):**
+```sh
+./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
+  --subdomain --repo-secret ./license.yaml
+```
+
+**Prerequisites-only installation (no Run.ai):**
+```sh
+# Install nginx, knative, lws, and storage class only
+./runai-installer.sh --install-only --nginx --knative --lws --install-sc
+```
+
 **Air-gapped installation:**
 ```sh
 ./runai-installer.sh --dns 192.168.0.100.sslip.io --air-gapped \
@@ -168,19 +189,39 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 
 ### Run.ai Installation Process
 1. **Validates** your environment and parameters
-2. **Installs** prerequisites (Nginx, Prometheus, GPU Operator) if requested
-3. **Configures** DNS settings (internal or hosts file)
-4. **Generates** or uses provided certificates
-5. **Deploys** Run.ai backend services
-6. **Configures** the Run.ai cluster
-7. **Verifies** the installation
-8. **Patches BCM** (if requested) to route traffic to Run.ai
+2. **Installs** prerequisites (Nginx, Prometheus, GPU Operator, Knative, LWS) if requested
+3. **Detects** GPU nodes with enhanced detection for nvidia.com/gpu.* labels
+4. **Configures** DNS settings (internal or hosts file)
+5. **Generates** or uses provided certificates (skipped in --install-only mode)
+6. **Deploys** Run.ai backend services
+7. **Configures** the Run.ai cluster
+8. **Creates** TLS secrets with idempotent kubectl apply
+9. **Sets up** subdomain support with wildcard ingress (if --subdomain)
+10. **Verifies** the installation
+11. **Patches BCM** (if requested) to route traffic to Run.ai
 
 ## 🔒 Default Access
 
 After installation, you can access Run.ai at:
 - **URL**: `https://YOUR_DNS_NAME`
 - **Default credentials**: `test@run.ai` / `XXX`
+
+## 🆕 Recent Improvements
+
+### Enhanced Features
+- **GPU Detection**: Automatic detection of GPU nodes via `nvidia.com/gpu.count`, `nvidia.com/gpu.product`, and `nvidia.com/gpu.present` labels
+- **Subdomain Support**: Wildcard ingress for unique workload URLs (e.g., `jupyter-abc123.runai.example.com`)
+- **Prerequisites-Only Mode**: Install infrastructure components (nginx, knative, lws, storage) without Run.ai
+- **Auto-Version Detection**: Use `--runai-version latest` to automatically detect and install the newest Run.ai version
+- **Idempotent TLS Secrets**: Uses `kubectl apply` to prevent duplicate secret creation errors
+- **Air-gapped Improvements**: Fixed certificate path resolution and TLS secret timing
+
+### Bug Fixes
+- Fixed duplicate TLS secret creation causing installation failures
+- Fixed air-gapped mode + subdomain TLS secret path issues
+- Fixed hanging kubectl apply -f - in subdomain logging
+- Fixed RunaiConfig patch timing to wait for pods to be ready
+- Enhanced GPU node detection for various NVIDIA GPU configurations
 
 ## 🖥️ Kubernetes Installation
 
