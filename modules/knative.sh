@@ -2,7 +2,7 @@
 
 # Function to install Knative
 install_knative() {
-    echo -e "${BLUE}Installing Knative (optional component)...${NC}"
+    echo -e "${BLUE}Installing Knative...${NC}"
     
     # Install Knative CRDs
     if ! log_command "kubectl apply -f https://github.com/knative/serving/releases/download/knative-v1.17.0/serving-crds.yaml" "Install Knative CRDs"; then

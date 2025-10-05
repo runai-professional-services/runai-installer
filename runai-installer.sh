@@ -87,6 +87,7 @@ show_usage() {
     echo "  --registry-secret FILE Registry secret YAML file to apply (optional in --air-gapped mode)"
     echo "  --skip-upload          Skip image uploads when images are already in registry (air-gapped mode)"
     echo "  --subdomain            Enable subdomain support with wildcard ingress"
+    echo "  --install-only         Install prerequisites only (nginx, knative, lws, storage-class) without Run.ai"
     echo "  --uninstall            Uninstall Run.ai completely from the cluster"
     echo ""
     echo "Examples:"
@@ -113,6 +114,9 @@ show_usage() {
     echo "  # Air-gapped installation with skip-upload (images already in registry)"
     echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com --skip-upload"
     echo ""
+    echo "  # Install prerequisites only (without Run.ai)"
+    echo "  $0 --install-only --nginx --knative --lws --install-sc"
+    echo ""
     echo "  # Uninstall Run.ai completely"
     echo "  $0 --uninstall"
     exit 1
@@ -120,8 +124,8 @@ show_usage() {
 
 # Function to validate required parameters
 validate_params() {
-    # Skip validation for uninstall mode
-    if [ "$UNINSTALL" = true ]; then
+    # Skip validation for uninstall mode or install-only mode
+    if [ "$UNINSTALL" = true ] || [ "$INSTALL_ONLY" = true ]; then
         return 0
     fi
     
@@ -130,9 +134,9 @@ validate_params() {
         show_usage
     fi
 
-    # Run.ai version is only required when not in air-gapped mode
-    if [ "$AIR_GAPPED_MODE" != true ] && [ -z "$RUNAI_VERSION" ]; then
-        echo -e "${RED}Error: --runai-version is required (unless using --air-gapped mode)${NC}"
+    # Run.ai version is only required when not in air-gapped mode or install-only mode
+    if [ "$AIR_GAPPED_MODE" != true ] && [ "$INSTALL_ONLY" != true ] && [ -z "$RUNAI_VERSION" ]; then
+        echo -e "${RED}Error: --runai-version is required (unless using --air-gapped or --install-only mode)${NC}"
         show_usage
     fi
     
@@ -218,6 +222,7 @@ load_env() {
     AIR_GAPPED_MODE=${AIR_GAPPED_MODE:-false}
     SKIP_UPLOAD=${SKIP_UPLOAD:-false}
     SUBDOMAIN_SUPPORT=${SUBDOMAIN_SUPPORT:-false}
+    INSTALL_ONLY=${INSTALL_ONLY:-false}
     AIR_GAPPED_FILE=${AIR_GAPPED_FILE:-}
 }
 
@@ -362,6 +367,10 @@ while [[ $# -gt 0 ]]; do
             SUBDOMAIN_SUPPORT=true
             shift
             ;;
+        --install-only)
+            INSTALL_ONLY=true
+            shift
+            ;;
         --BCM)
             BCM_CONFIG=true
             shift
@@ -401,11 +410,13 @@ fi
 # Validate parameters (only if not uninstalling)
 validate_params
 
-# Create namespaces first
-echo -e "${BLUE}Creating namespaces...${NC}"
-kubectl create namespace runai 2>/dev/null || true
-kubectl create namespace runai-backend 2>/dev/null || true
-echo -e "${GREEN}✅ Namespaces created${NC}"
+# Create namespaces first (skip if install-only mode)
+if [ "$INSTALL_ONLY" != true ]; then
+    echo -e "${BLUE}Creating namespaces...${NC}"
+    kubectl create namespace runai 2>/dev/null || true
+    kubectl create namespace runai-backend 2>/dev/null || true
+    echo -e "${GREEN}✅ Namespaces created${NC}"
+fi
 
 # Source and execute modules based on configuration
 source ./modules/log.sh
@@ -414,8 +425,8 @@ init_logging
 source ./modules/helm.sh
 check_helm_version
 
-# Only setup certificates if not in air-gapped mode (air-gapped handles its own certificates)
-if [ "$AIR_GAPPED_MODE" != true ]; then
+# Only setup certificates if not in air-gapped mode or install-only mode
+if [ "$AIR_GAPPED_MODE" != true ] && [ "$INSTALL_ONLY" != true ]; then
     source ./modules/certificates.sh
     if [ "$NO_CERT" != true ]; then
         setup_certificates
@@ -498,46 +509,52 @@ if [ "$INSTALL_KNATIVE" = true ]; then
     install_knative
 fi
 
-# Handle Run.ai node labeling before any installations
-echo -e "${BLUE}Configuring Run.ai node roles...${NC}"
-if [ -f "./modules/node-labeling.sh" ]; then
-    source ./modules/node-labeling.sh
-    if handle_runai_node_labeling; then
-        echo -e "${GREEN}✅ Run.ai node labeling completed successfully${NC}"
-    else
-        echo -e "${YELLOW}⚠️ Run.ai node labeling completed with warnings${NC}"
-    fi
+# Skip Run.ai installation if --install-only is set
+if [ "$INSTALL_ONLY" = true ]; then
+    echo -e "${BLUE}Install-only mode: Skipping Run.ai installation${NC}"
+    echo -e "${BLUE}Only prerequisites will be installed${NC}"
 else
-    echo -e "${YELLOW}⚠️ Node labeling module not found - skipping node labeling${NC}"
-fi
-
-source ./modules/air-gapped.sh
-if [ "$AIR_GAPPED_MODE" = true ]; then
-    if handle_air_gapped; then
-        echo -e "${GREEN}✅ Air-gapped installation completed successfully${NC}"
-        # Continue with additional components instead of exiting
+    # Handle Run.ai node labeling before any installations
+    echo -e "${BLUE}Configuring Run.ai node roles...${NC}"
+    if [ -f "./modules/node-labeling.sh" ]; then
+        source ./modules/node-labeling.sh
+        if handle_runai_node_labeling; then
+            echo -e "${GREEN}✅ Run.ai node labeling completed successfully${NC}"
+        else
+            echo -e "${YELLOW}⚠️ Run.ai node labeling completed with warnings${NC}"
+        fi
     else
-        echo -e "${RED}❌ Air-gapped installation failed${NC}"
-        echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
-        exit 1
+        echo -e "${YELLOW}⚠️ Node labeling module not found - skipping node labeling${NC}"
     fi
-fi
 
-# Only install Run.ai if not in air-gapped mode (air-gapped handles its own installation)
-if [ "$AIR_GAPPED_MODE" != true ]; then
-    source ./modules/runai.sh
-    install_runai
-fi
+    source ./modules/air-gapped.sh
+    if [ "$AIR_GAPPED_MODE" = true ]; then
+        if handle_air_gapped; then
+            echo -e "${GREEN}✅ Air-gapped installation completed successfully${NC}"
+            # Continue with additional components instead of exiting
+        else
+            echo -e "${RED}❌ Air-gapped installation failed${NC}"
+            echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
+            exit 1
+        fi
+    fi
 
-# Handle subdomain support if requested
-if [ "$SUBDOMAIN_SUPPORT" = true ]; then
-    echo -e "${BLUE}Setting up subdomain support...${NC}"
-    source ./modules/subdomain.sh
-    if handle_subdomain_support; then
-        echo -e "${GREEN}✅ Subdomain support setup completed successfully${NC}"
-    else
-        echo -e "${RED}❌ Subdomain support setup failed${NC}"
-        echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
+    # Only install Run.ai if not in air-gapped mode (air-gapped handles its own installation)
+    if [ "$AIR_GAPPED_MODE" != true ]; then
+        source ./modules/runai.sh
+        install_runai
+    fi
+
+    # Handle subdomain support if requested
+    if [ "$SUBDOMAIN_SUPPORT" = true ]; then
+        echo -e "${BLUE}Setting up subdomain support...${NC}"
+        source ./modules/subdomain.sh
+        if handle_subdomain_support; then
+            echo -e "${GREEN}✅ Subdomain support setup completed successfully${NC}"
+        else
+            echo -e "${RED}❌ Subdomain support setup failed${NC}"
+            echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
+        fi
     fi
 fi
 
@@ -553,6 +570,7 @@ EOF
 echo -e "${NC}"
 
 echo -e "${BLUE}Configuration:${NC}"
+echo -e "Install Mode: $([ "$INSTALL_ONLY" = true ] && echo "Prerequisites Only" || echo "Full Run.ai Installation")"
 echo -e "DNS Name: $DNS_NAME"
 echo -e "Run.ai Version: $RUNAI_VERSION"
 echo -e "Cluster Only: $([ "$CLUSTER_ONLY" = true ] && echo "Yes" || echo "No")"
@@ -579,25 +597,44 @@ if [ "$AIR_GAPPED_MODE" = true ]; then
 fi
 
 # Final success message
-echo -e "\n${GREEN}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}║                                                                       ║${NC}"
-echo -e "${GREEN}║              Installation Completed Successfully!                     ║${NC}"
-echo -e "${GREEN}║                                                                       ║${NC}"
-echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
-echo -e "\n${BLUE}You can access Run.ai at: ${GREEN}https://$DNS_NAME${NC}"
-echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / Abcd!234${NC}\n"
-
-# Add certificate instructions if using self-signed certificates
-if [ -z "$CERT_FILE" ] && [ -z "$KEY_FILE" ]; then
-    echo -e "${YELLOW}For self-signed certificates:${NC}"
-    echo -e "${YELLOW}1. Copy the root CA certificate to your browser:${NC}"
-    echo -e "${YELLOW}   - Chrome: Settings -> Privacy and Security -> Security -> Manage Certificates -> Authorities -> Import${NC}"
-    echo -e "${YELLOW}   - Firefox: Settings -> Privacy & Security -> Certificates -> View Certificates -> Authorities -> Import${NC}"
-    echo -e "${YELLOW}2. For Ubuntu systems, install the certificate:${NC}"
-    echo -e "${YELLOW}   - Copy the certificate: ${GREEN}sudo cp ./certificates/rootCA.pem /usr/local/share/ca-certificates/runai-ca.crt${NC}"
-    echo -e "${YELLOW}   - Update the certificate store: ${GREEN}sudo update-ca-certificates --fresh${NC}"
-    echo -e "${YELLOW}3. Select the file: ${GREEN}./certificates/rootCA.pem${NC}"
+if [ "$INSTALL_ONLY" = true ]; then
+    # Simple message for prerequisites-only installation
+    echo -e "\n${GREEN}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║                                                                       ║${NC}"
+    echo -e "${GREEN}║         Prerequisites Installation Completed Successfully!            ║${NC}"
+    echo -e "${GREEN}║                                                                       ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "\n${BLUE}Installed components:${NC}"
+    [ "$INSTALL_NGINX" = true ] && echo -e "  ${GREEN}✅ Nginx Ingress Controller${NC}"
+    [ "$INSTALL_KNATIVE" = true ] && echo -e "  ${GREEN}✅ Knative Serving${NC}"
+    [ "$INSTALL_LWS" = true ] && echo -e "  ${GREEN}✅ Local Workload Service (LWS)${NC}"
+    [ "$INSTALL_STORAGE_CLASS" = true ] && echo -e "  ${GREEN}✅ Storage Class${NC}"
+    [ "$INSTALL_PROMETHEUS" = true ] && echo -e "  ${GREEN}✅ Prometheus Stack${NC}"
+    [ "$INSTALL_GPU_OPERATOR" = true ] && echo -e "  ${GREEN}✅ NVIDIA GPU Operator${NC}"
+    [ "$INSTALL_TRAINING" = true ] && echo -e "  ${GREEN}✅ Kubeflow Training Operator${NC}"
     echo
+else
+    # Full Run.ai installation message
+    echo -e "\n${GREEN}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║                                                                       ║${NC}"
+    echo -e "${GREEN}║              Installation Completed Successfully!                     ║${NC}"
+    echo -e "${GREEN}║                                                                       ║${NC}"
+    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "\n${BLUE}You can access Run.ai at: ${GREEN}https://$DNS_NAME${NC}"
+    echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / Abcd!234${NC}\n"
+
+    # Add certificate instructions if using self-signed certificates
+    if [ -z "$CERT_FILE" ] && [ -z "$KEY_FILE" ]; then
+        echo -e "${YELLOW}For self-signed certificates:${NC}"
+        echo -e "${YELLOW}1. Copy the root CA certificate to your browser:${NC}"
+        echo -e "${YELLOW}   - Chrome: Settings -> Privacy and Security -> Security -> Manage Certificates -> Authorities -> Import${NC}"
+        echo -e "${YELLOW}   - Firefox: Settings -> Privacy & Security -> Certificates -> View Certificates -> Authorities -> Import${NC}"
+        echo -e "${YELLOW}2. For Ubuntu systems, install the certificate:${NC}"
+        echo -e "${YELLOW}   - Copy the certificate: ${GREEN}sudo cp ./certificates/rootCA.pem /usr/local/share/ca-certificates/runai-ca.crt${NC}"
+        echo -e "${YELLOW}   - Update the certificate store: ${GREEN}sudo update-ca-certificates --fresh${NC}"
+        echo -e "${YELLOW}3. Select the file: ${GREEN}./certificates/rootCA.pem${NC}"
+        echo
+    fi
 fi
 
 echo -e "${BLUE}Thank you for using the AI Factory One-Click Installer!${NC}" 
