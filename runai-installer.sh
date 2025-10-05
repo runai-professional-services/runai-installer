@@ -86,6 +86,7 @@ show_usage() {
     echo "  --registry URL         Registry URL for air-gapped installation (required with --air-gapped)"
     echo "  --registry-secret FILE Registry secret YAML file to apply (optional in --air-gapped mode)"
     echo "  --skip-upload          Skip image uploads when images are already in registry (air-gapped mode)"
+    echo "  --subdomain            Enable subdomain support with wildcard ingress"
     echo "  --uninstall            Uninstall Run.ai completely from the cluster"
     echo ""
     echo "Examples:"
@@ -216,6 +217,7 @@ load_env() {
     BCM_CONFIG=${BCM_CONFIG:-false}
     AIR_GAPPED_MODE=${AIR_GAPPED_MODE:-false}
     SKIP_UPLOAD=${SKIP_UPLOAD:-false}
+    SUBDOMAIN_SUPPORT=${SUBDOMAIN_SUPPORT:-false}
     AIR_GAPPED_FILE=${AIR_GAPPED_FILE:-}
 }
 
@@ -354,6 +356,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --skip-upload)
             SKIP_UPLOAD=true
+            shift
+            ;;
+        --subdomain)
+            SUBDOMAIN_SUPPORT=true
             shift
             ;;
         --BCM)
@@ -523,6 +529,18 @@ if [ "$AIR_GAPPED_MODE" != true ]; then
     install_runai
 fi
 
+# Handle subdomain support if requested
+if [ "$SUBDOMAIN_SUPPORT" = true ]; then
+    echo -e "${BLUE}Setting up subdomain support...${NC}"
+    source ./modules/subdomain.sh
+    if handle_subdomain_support; then
+        echo -e "${GREEN}✅ Subdomain support setup completed successfully${NC}"
+    else
+        echo -e "${RED}❌ Subdomain support setup failed${NC}"
+        echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
+    fi
+fi
+
 # Display configuration summary
 echo -e "\n${GREEN}"
 cat << "EOF" > /dev/null
@@ -551,6 +569,7 @@ echo -e "Skip Certificate Setup: $([ "$NO_CERT" = true ] && echo "Yes" || echo "
 echo -e "Custom Certificates: $([ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && echo "Yes" || echo "No")"
 echo -e "Repository Secret: $([ -n "$REPO_SECRET" ] && echo "$REPO_SECRET" || echo "None")"
 echo -e "BCM Configuration: $([ "$BCM_CONFIG" = true ] && echo "Yes" || echo "No")"
+echo -e "Subdomain Support: $([ "$SUBDOMAIN_SUPPORT" = true ] && echo "Yes" || echo "No")"
 echo -e "Air-gapped Mode: $([ "$AIR_GAPPED_MODE" = true ] && echo "Yes" || echo "No")"
 if [ "$AIR_GAPPED_MODE" = true ]; then
     echo -e "Air-gapped File: $([ -n "$AIR_GAPPED_FILE" ] && echo "$AIR_GAPPED_FILE" || echo "None")"

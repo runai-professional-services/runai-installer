@@ -124,35 +124,8 @@ install_runai() {
 
     # If not in cluster-only mode, install the backend
     if [ "$CLUSTER_ONLY" != true ]; then
-        # Handle certificates only if not using --no-cert
-        if [ "$NO_CERT" != true ]; then
-            echo -e "${BLUE}Creating/updating TLS secrets...${NC}"
-
-            # Delete existing secrets first
-                kubectl -n runai-backend delete secret runai-backend-tls >/dev/null 2>&1 || true
-    kubectl -n runai-backend delete secret runai-ca-cert >/dev/null 2>&1 || true
-    kubectl -n runai delete secret runai-ca-cert >/dev/null 2>&1 || true
-
-            # Create new secrets
-            if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY" "Create TLS secret"; then
-                echo -e "${RED}❌ Failed to create TLS secret${NC}"
-                exit 1
-            fi
-
-            if ! log_command "kubectl create secret generic runai-ca-cert -n runai-backend --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai-backend namespace"; then
-                echo -e "${RED}❌ Failed to create CA cert secret in runai-backend namespace${NC}"
-                exit 1
-            fi
-
-            if ! log_command "kubectl create secret generic runai-ca-cert -n runai --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai namespace"; then
-                echo -e "${RED}❌ Failed to create CA cert secret in runai namespace${NC}"
-                exit 1
-            fi
-
-            echo -e "${GREEN}✅ Certificate secrets created successfully${NC}"
-        else
-            echo -e "${BLUE}Skipping certificate secrets creation as requested with --no-cert flag...${NC}"
-        fi
+        # Certificate secrets are already created by the certificates module
+        # No need to recreate them here to avoid conflicts
 
         # Apply repository secret if provided
         if [ -n "$REPO_SECRET" ]; then

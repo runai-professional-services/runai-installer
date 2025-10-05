@@ -105,36 +105,39 @@ EOF
             fi
         else
             echo -e "${BLUE}Generating self-signed certificates...${NC}"
-            # Generate self-signed certificates
+            # Generate self-signed certificates (without creating Kubernetes secrets)
             source ./modules/certificates.sh
-            setup_certificates
+            # Call the certificate generation part only, not the Kubernetes secret creation
+            generate_certificates_only
+            
+            # Set certificate paths for air-gapped mode (relative to script location)
+            local script_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+            local installer_dir="$(dirname "$script_dir")"
+            export CERT="$installer_dir/certificates/runai.crt"
+            export KEY="$installer_dir/certificates/runai.key"
+            export FULL="$installer_dir/certificates/full-chain.pem"
         fi
         
-        # Create TLS secrets in Kubernetes (for both custom and self-signed certificates)
-        echo -e "${BLUE}Creating TLS secrets in Kubernetes...${NC}"
+        # Create/update TLS secrets in Kubernetes (for both custom and self-signed certificates)
+        echo -e "${BLUE}Creating/updating TLS secrets in Kubernetes...${NC}"
         
-        # Delete existing secrets first
-        log_command "kubectl -n runai-backend delete secret runai-backend-tls >/dev/null 2>&1 || true" "Delete existing TLS secret in runai-backend"
-        log_command "kubectl -n runai-backend delete secret runai-ca-cert >/dev/null 2>&1 || true" "Delete existing CA cert secret in runai-backend"
-        log_command "kubectl -n runai delete secret runai-ca-cert >/dev/null 2>&1 || true" "Delete existing CA cert secret in runai"
-        
-        # Create new secrets
-        if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY" "Create TLS secret in runai-backend namespace"; then
-            echo -e "${RED}❌ Failed to create TLS secret in runai-backend namespace${NC}"
+        # Apply TLS secrets (idempotent - creates if not exists, updates if exists)
+        if ! log_command "kubectl create secret tls runai-backend-tls -n runai-backend --cert=$CERT --key=$KEY --dry-run=client -o yaml | kubectl apply -f -" "Apply TLS secret in runai-backend namespace"; then
+            echo -e "${RED}❌ Failed to apply TLS secret in runai-backend namespace${NC}"
             return 1
         fi
         
-        if ! log_command "kubectl create secret generic runai-ca-cert -n runai-backend --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai-backend namespace"; then
-            echo -e "${RED}❌ Failed to create CA cert secret in runai-backend namespace${NC}"
+        if ! log_command "kubectl create secret generic runai-ca-cert -n runai-backend --from-file=runai-ca.pem=$FULL --dry-run=client -o yaml | kubectl apply -f -" "Apply CA cert secret in runai-backend namespace"; then
+            echo -e "${RED}❌ Failed to apply CA cert secret in runai-backend namespace${NC}"
             return 1
         fi
         
-        if ! log_command "kubectl create secret generic runai-ca-cert -n runai --from-file=runai-ca.pem=$FULL" "Create CA cert secret in runai namespace"; then
-            echo -e "${RED}❌ Failed to create CA cert secret in runai namespace${NC}"
+        if ! log_command "kubectl create secret generic runai-ca-cert -n runai --from-file=runai-ca.pem=$FULL --dry-run=client -o yaml | kubectl apply -f -" "Apply CA cert secret in runai namespace"; then
+            echo -e "${RED}❌ Failed to apply CA cert secret in runai namespace${NC}"
             return 1
         fi
         
-        echo -e "${GREEN}✅ TLS secrets created successfully${NC}"
+        echo -e "${GREEN}✅ TLS secrets applied successfully${NC}"
     else
         echo -e "${BLUE}Skipping certificate setup as requested with --no-cert flag...${NC}"
     fi
@@ -534,6 +537,14 @@ EOF
         fi
         sleep 5
     done
+    
+    # Apply cluster domain star TLS secret (after all pods are ready)
+    echo -e "${BLUE}Applying cluster domain star TLS secret...${NC}"
+    if log_command "kubectl create secret tls runai-cluster-domain-star-tls-secret -n runai --cert=$CERT --key=$KEY --dry-run=client -o yaml | kubectl apply -f -" "Apply cluster domain star TLS secret in runai namespace"; then
+        echo -e "${GREEN}✅ Cluster domain star TLS secret applied successfully${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Warning: Failed to apply cluster domain star TLS secret, continuing...${NC}"
+    fi
     
     # Disable external authentication for air-gapped environment
     kubectl patch RunaiConfig runai -n runai --type="merge" -p '{"spec":{"workload-controller":{"externalAuthUrlEnabled": false}}}'
