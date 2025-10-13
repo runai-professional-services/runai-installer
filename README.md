@@ -191,14 +191,15 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 1. **Validates** your environment and parameters
 2. **Installs** prerequisites (Nginx, Prometheus, GPU Operator, Knative, LWS) if requested
 3. **Detects** GPU nodes with enhanced detection for nvidia.com/gpu.* labels
-4. **Configures** DNS settings (internal or hosts file)
-5. **Generates** or uses provided certificates (skipped in --install-only mode)
-6. **Deploys** Run.ai backend services
-7. **Configures** the Run.ai cluster
-8. **Creates** TLS secrets with idempotent kubectl apply
-9. **Sets up** subdomain support with wildcard ingress (if --subdomain)
-10. **Verifies** the installation
-11. **Patches BCM** (if requested) to route traffic to Run.ai
+4. **Labels** CPU nodes for Run.ai system services (excludes master/control-plane nodes)
+5. **Configures** DNS settings (internal or hosts file)
+6. **Generates** or uses provided certificates (skipped in --install-only mode)
+7. **Deploys** Run.ai backend services
+8. **Configures** the Run.ai cluster
+9. **Creates** TLS secrets with idempotent kubectl apply
+10. **Sets up** subdomain support with wildcard ingress (if --subdomain)
+11. **Verifies** the installation
+12. **Patches BCM** (if requested) to route traffic to Run.ai
 
 ## 🔒 Default Access
 
@@ -210,6 +211,7 @@ After installation, you can access Run.ai at:
 
 ### Enhanced Features
 - **GPU Detection**: Automatic detection of GPU nodes via `nvidia.com/gpu.count`, `nvidia.com/gpu.product`, and `nvidia.com/gpu.present` labels
+- **Smart Node Labeling**: CPU nodes are automatically labeled for Run.ai system services, with master/control-plane nodes excluded
 - **Subdomain Support**: Wildcard ingress for unique workload URLs (e.g., `jupyter-abc123.runai.example.com`)
 - **Prerequisites-Only Mode**: Install infrastructure components (nginx, knative, lws, storage) without Run.ai
 - **Auto-Version Detection**: Use `--runai-version latest` to automatically detect and install the newest Run.ai version

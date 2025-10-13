@@ -80,6 +80,16 @@ label_cpu_nodes_for_runai_system() {
             break
         fi
         
+        # Check if this is a master/control-plane node
+        local is_master=$(kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/master}' 2>/dev/null)
+        local is_control_plane=$(kubectl get node "$node" -o jsonpath='{.metadata.labels.node-role\.kubernetes\.io/control-plane}' 2>/dev/null)
+        
+        # Skip master/control-plane nodes
+        if [ -n "$is_master" ] || [ -n "$is_control_plane" ]; then
+            echo -e "${BLUE}ℹ️ Skipping master/control-plane node: $node${NC}"
+            continue
+        fi
+        
         # Check if node has GPU resources (multiple ways to detect GPUs)
         local gpu_count=$(kubectl get node "$node" -o jsonpath='{.status.capacity.nvidia\.com/gpu}' 2>/dev/null)
         local gpu_product=$(kubectl get node "$node" -o jsonpath='{.status.capacity.nvidia\.com/gpu\.product}' 2>/dev/null)

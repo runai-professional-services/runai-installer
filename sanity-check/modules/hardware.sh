@@ -28,7 +28,7 @@ check_hardware_requirements() {
             SUPPORTED_VERSIONS=""
             
             # Check each Run.ai version's compatibility
-            if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(2[7-9]|3[0-2])$ ]]; then
+            if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(2[7-9]|3[0-4])$ ]]; then
                 # v2.17 supports 1.27-1.29
                 if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(2[7-9])$ ]]; then
                     SUPPORTED_VERSIONS="2.17"
@@ -62,6 +62,12 @@ check_hardware_requirements() {
                 if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(3[1-3])$ ]]; then
                     [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
                     SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.22"
+                fi
+                
+                # v2.23 (latest) supports 1.31-1.34
+                if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(3[1-4])$ ]]; then
+                    [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
+                    SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.23"
                 fi
             fi
             

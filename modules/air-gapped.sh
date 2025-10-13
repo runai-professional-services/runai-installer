@@ -531,8 +531,12 @@ EOF
         RUNNING_PODS=$(kubectl get pods -n runai --no-headers | grep "Running" | wc -l)
         NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
 
+        # Use carriage return to update the same line
+        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
+
         if [ "$NOT_READY" -eq 0 ]; then
-            echo -e "${GREEN}✅ All Run.ai cluster pods are ready${NC}"
+            # Print a newline and completion message when done
+            echo -e "\n${GREEN}✅ All Run.ai cluster pods are ready${NC}"
             break
         fi
         sleep 5
