@@ -276,11 +276,25 @@ check_required_components() {
         echo -e "${RED}❌ NGINX Missing${NC}"
     fi
     
-    # Check for GPU Operator
-    if echo "$HELM_RELEASES" | grep -q "gpu-operator"; then
+    # Check for GPU Operator - either Helm release, namespace, or pods is sufficient
+    GPU_HELM=$(echo "$HELM_RELEASES" | grep -qE "gpu-operator|nvidia-gpu-operator" && echo "true" || echo "false")
+    GPU_NS=$(kubectl get namespaces 2>/dev/null | grep -qE "gpu-operator|nvidia-gpu-operator" && echo "true" || echo "false")
+    GPU_PODS=$(kubectl get pods -A 2>/dev/null | grep -qE "gpu-operator|nvidia-device-plugin" && echo "true" || echo "false")
+    
+    if [ "$GPU_HELM" = "true" ] || [ "$GPU_NS" = "true" ] || [ "$GPU_PODS" = "true" ]; then
         echo -e "${GREEN}✅ GPU Operator Installed${NC}"
     else
         echo -e "${RED}❌ GPU Operator Missing${NC}"
+    fi
+    
+    # Check for Knative - either Helm release or namespaces is sufficient
+    KNATIVE_HELM=$(echo "$HELM_RELEASES" | grep -q "knative" && echo "true" || echo "false")
+    KNATIVE_NS=$(kubectl get namespaces 2>/dev/null | grep -qE "knative-serving|knative-eventing" && echo "true" || echo "false")
+    
+    if [ "$KNATIVE_HELM" = "true" ] || [ "$KNATIVE_NS" = "true" ]; then
+        echo -e "${GREEN}✅ Knative Installed${NC}"
+    else
+        echo -e "${RED}❌ Knative Missing${NC}"
     fi
     
     echo ""

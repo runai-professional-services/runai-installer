@@ -88,6 +88,7 @@ show_usage() {
     echo "  --skip-upload          Skip image uploads when images are already in registry (air-gapped mode)"
     echo "  --subdomain            Enable subdomain support with wildcard ingress"
     echo "  --install-only         Install prerequisites only (nginx, knative, lws, storage-class) without Run.ai"
+    echo "  --label NODES          Comma-separated list of node names to label for Run.ai system (e.g., server1,server2)"
     echo "  --uninstall            Uninstall Run.ai completely from the cluster"
     echo ""
     echo "Examples:"
@@ -116,6 +117,9 @@ show_usage() {
     echo ""
     echo "  # Install prerequisites only (without Run.ai)"
     echo "  $0 --install-only --nginx --knative --lws --install-sc"
+    echo ""
+    echo "  # Label specific nodes for Run.ai system services"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --label server1,server2 --repo-secret /root/jfrog"
     echo ""
     echo "  # Uninstall Run.ai completely"
     echo "  $0 --uninstall"
@@ -224,6 +228,7 @@ load_env() {
     SUBDOMAIN_SUPPORT=${SUBDOMAIN_SUPPORT:-false}
     INSTALL_ONLY=${INSTALL_ONLY:-false}
     AIR_GAPPED_FILE=${AIR_GAPPED_FILE:-}
+    LABEL_NODES=${LABEL_NODES:-}
 }
 
 # Function to log commands and their output
@@ -370,6 +375,10 @@ while [[ $# -gt 0 ]]; do
         --install-only)
             INSTALL_ONLY=true
             shift
+            ;;
+        --label)
+            LABEL_NODES="$2"
+            shift 2
             ;;
         --BCM)
             BCM_CONFIG=true
@@ -518,7 +527,7 @@ else
     echo -e "${BLUE}Configuring Run.ai node roles...${NC}"
     if [ -f "./modules/node-labeling.sh" ]; then
         source ./modules/node-labeling.sh
-        if handle_runai_node_labeling; then
+        if handle_runai_node_labeling "$LABEL_NODES"; then
             echo -e "${GREEN}✅ Run.ai node labeling completed successfully${NC}"
         else
             echo -e "${YELLOW}⚠️ Run.ai node labeling completed with warnings${NC}"
