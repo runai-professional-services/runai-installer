@@ -1,0 +1,15 @@
+cat <<EOF > gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: gateway
+  namespace: runai-backend
+spec:
+  gatewayClassName: nginx
+  listeners:
+  - name: http
+    port: 80
+    protocol: HTTP
+    hostname: "192.168.0.160.sslip.io"
+EOF
+kubectl apply -f gateway.yaml
