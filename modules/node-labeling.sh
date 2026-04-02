@@ -64,7 +64,7 @@ detect_gpu_nodes() {
 label_cpu_nodes_for_runai_system() {
     local user_specified_nodes="$1"
     
-    echo -e "${BLUE}Labeling CPU nodes with Run.ai system role...${NC}"
+    echo -e "${BLUE}Labelingdd CPU nodes with Run.ai system role...${NC}"
     
     local labeled_count=0
     local labeled_nodes=()

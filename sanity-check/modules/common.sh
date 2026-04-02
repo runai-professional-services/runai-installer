@@ -29,6 +29,8 @@ show_usage() {
     echo -e "  --prereq         Check prerequisite software"
     echo -e "  --clean          Clean up all sanity-test namespaces (manual cleanup required)"
     echo -e "  --silent        Suppress output messages"
+    echo -e "  --ngc-check      Validate NGC API key (Helm + nvcr); see modules/ngc-check.sh"
+    echo -e "  --ngc-key KEY    NGC API key for --ngc-check"
     echo -e "  -h, --help      Show this help message"
     echo -e "\n${YELLOW}Examples:${NC}"
     echo -e "  $0 --cert cert.pem --key key.pem --dns example.com"

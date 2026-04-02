@@ -316,7 +316,13 @@ EOF
         export KUBECONFIG="$HOME/.kube/config"
         kubectl config use-context "$(kubectl config current-context)" >/dev/null 2>&1
         
-        if ! log_command "helm upgrade -i runai-backend charts/control-plane.tgz --set global.domain=\"$DOMAIN\" --set global.customCA.enabled=true -n runai-backend -f custom-env.yaml" "Install Run.ai backend"; then
+        local cp_ingress_opts=""
+        if [ -n "${RUNAI_INGRESS_CLASS:-}" ]; then
+            cp_ingress_opts="--set global.ingress.ingressClass=$RUNAI_INGRESS_CLASS"
+        elif [ "${INSTALL_HAPROXY:-false}" = true ]; then
+            cp_ingress_opts="--set global.ingress.ingressClass=haproxy"
+        fi
+        if ! log_command "helm upgrade -i runai-backend charts/control-plane.tgz --set global.domain=\"$DOMAIN\" --set global.customCA.enabled=true $cp_ingress_opts -n runai-backend -f custom-env.yaml" "Install Run.ai backend"; then
             echo -e "${RED}❌ Failed to install Run.ai backend${NC}"
             return 1
         fi

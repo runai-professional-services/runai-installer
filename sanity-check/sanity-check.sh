@@ -33,6 +33,10 @@ if [ -f "$SCRIPT_DIR/modules/storage.sh" ]; then
   # shellcheck source=/dev/null
   source "$SCRIPT_DIR/modules/storage.sh"
 fi
+if [ -f "$SCRIPT_DIR/modules/ngc-check.sh" ]; then
+  # shellcheck source=/dev/null
+  source "$SCRIPT_DIR/modules/ngc-check.sh"
+fi
 
 # Create logs directory
 LOGS_DIR="./logs"
@@ -858,6 +862,7 @@ cleanup() {
 # Initialize variables
 HARDWARE_CHECK=false
 DISK_CHECK=false
+NGC_CHECK=false
 DIAG=false
 DIAG_DNS=""
 CLEAN=false
@@ -904,6 +909,8 @@ show_usage() {
     echo -e "  --prereq         Check prerequisite software"
     echo -e "  --clean          Clean up all sanity-test namespaces (manual cleanup required)"
     echo -e "  --silent        Suppress output messages"
+    echo -e "  --ngc-check      Validate NGC API key (Helm Run:ai index + nvcr.io pulls)"
+    echo -e "  --ngc-key KEY    NGC API key for --ngc-check (or set env NGC_API_KEY)"
     echo -e "  -h, --help      Show this help message"
     echo -e ""
     echo -e "${YELLOW}Examples:${NC}"
@@ -911,6 +918,7 @@ show_usage() {
     echo -e "  ./sanity-check.sh --storage"
     echo -e "  ./sanity-check.sh --hardware"
     echo -e "  ./sanity-check.sh --diag --diag-dns example.com"
+    echo -e "  ./sanity-check.sh --ngc-check --ngc-key \"\$NGC_API_KEY\""
     exit 1
 }
 
@@ -994,6 +1002,16 @@ while [[ $# -gt 0 ]]; do
             VALID_ARGS=true
             shift
             ;;
+        --ngc-check)
+            NGC_CHECK=true
+            VALID_ARGS=true
+            shift
+            ;;
+        --ngc-key)
+            NGC_API_KEY="$2"
+            VALID_ARGS=true
+            shift 2
+            ;;
         -h|--help)
             show_usage
             ;;
@@ -1015,13 +1033,27 @@ if [ "$VALID_ARGS" = false ]; then
     echo -e "  - The --software flag for prerequisite software check"
     echo -e "  - The --diag flag for preinstall diagnostics"
     echo -e "  - The --clean flag to clean up test namespaces"
+    echo -e "  - The --ngc-check flag (with --ngc-key or NGC_API_KEY) to validate an NGC API key"
     echo -e "\n"
     show_usage
     exit 1
 fi
 
+# NGC API key check (standalone; see modules/ngc-check.sh)
+if [ "$NGC_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$SOFTWARE_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ "$CLEAN" != "true" ] && [ -z "$CERT_FILE" ]; then
+    if [ -z "${NGC_API_KEY:-}" ]; then
+        echo -e "${RED}❌ --ngc-check requires --ngc-key <KEY> or environment variable NGC_API_KEY${NC}"
+        exit 1
+    fi
+    if ! run_ngc_key_check; then
+        exit 1
+    fi
+    echo -e "\n${GREEN}✅ NGC key check completed.${NC}"
+    exit 0
+fi
+
 # Run diagnostics first if requested, and exit if it's the only operation
-if [ "$DIAG" = true ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
+if [ "$DIAG" = true ] && [ "$NGC_CHECK" != "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
     if ! run_diagnostics_check; then
         echo -e "${RED}❌ Diagnostics check failed${NC}"
         exit 1
@@ -1031,8 +1063,8 @@ if [ "$DIAG" = true ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" !=
 fi
 
 # Validate required parameters
-if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$SOFTWARE_CHECK" != "true" ] && [ "$CLEAN" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
-    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage, --hardware, --disk, --software, or --clean${NC}"
+if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$SOFTWARE_CHECK" != "true" ] && [ "$CLEAN" != "true" ] && [ "$NGC_CHECK" != "true" ] && ([ -z "$CERT_FILE" ] || [ -z "$KEY_FILE" ] || [ -z "$DNS_NAME" ]); then
+    echo -e "${RED}Error: --cert, --key, and --dns are required unless using --storage, --hardware, --disk, --software, --clean, or --ngc-check${NC}"
     show_usage
 fi
 
@@ -1054,14 +1086,14 @@ if [ "$CLEAN" = "true" ]; then
         exit 1
     fi
     # Only exit if this is the only operation requested
-    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$SOFTWARE_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ -z "$CERT_FILE" ]; then
+    if [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$SOFTWARE_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ "$NGC_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
         echo -e "\n${GREEN}✅ Cleanup completed successfully!${NC}"
         exit 0
     fi
 fi
 
 # Run hardware check if requested (early exit only if it's the only operation)
-if [ "$HARDWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$SOFTWARE_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ -z "$CERT_FILE" ]; then
+if [ "$HARDWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$SOFTWARE_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ "$NGC_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
     if ! check_hardware_requirements; then
         echo -e "${RED}❌ Hardware validation failed${NC}"
         exit 1
@@ -1071,7 +1103,7 @@ if [ "$HARDWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$DISK_C
 fi
 
 # Run software check if requested (early exit only if it's the only operation)
-if [ "$SOFTWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ -z "$CERT_FILE" ]; then
+if [ "$SOFTWARE_CHECK" = "true" ] && [ "$STORAGE_ONLY" != "true" ] && [ "$HARDWARE_CHECK" != "true" ] && [ "$DISK_CHECK" != "true" ] && [ "$DIAG" != "true" ] && [ "$NGC_CHECK" != "true" ] && [ -z "$CERT_FILE" ]; then
     if ! bash "$(dirname "$0")/validate-prereqs.sh"; then
         echo -e "${RED}❌ Software validation failed${NC}"
         exit 1

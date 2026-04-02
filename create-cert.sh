@@ -189,7 +189,7 @@ main() {
         # Verify all requested DNS names are present
         local missing_names=()
         for name in "${names[@]}"; do
-            if ! echo "$san_output" | grep -q "DNS:${name}"; then
+            if ! echo "$san_output" | grep -qF "DNS:${name}"; then
                 missing_names+=("$name")
             fi
         done

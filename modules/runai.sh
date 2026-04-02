@@ -226,8 +226,7 @@ install_runai() {
             sleep 5
         done
     else
-        # If in cluster-only mode, we need to check the existing backend configuration
-        echo -e "${BLUE}Running in cluster-only mode, checking existing backend configuration...${NC}"
+        # If in cluster-only mode, we need to checke "${BLUE}Running in cluster-only mode, checking existing backend configuration...${NC}"
 
         # Check if runai-backend is installed and get its configuration
         if helm get values runai-backend -n runai-backend &>/dev/null; then
@@ -399,3 +398,4 @@ install_runai() {
 
     echo -e "${GREEN}✅ Run.ai installation completed successfully!${NC}"
 } 
+

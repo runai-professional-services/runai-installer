@@ -27,6 +27,10 @@ check_dependencies() {
 # Check dependencies first
 check_dependencies
 
+# Control-plane Helm helpers (JFrog vs NGC) — used by get_latest_runai_version and runai module
+source ./modules/jfrog.sh
+source ./modules/ngc.sh
+
 # Debug information
 echo "Script started at $(date)"
 echo "Script path: $0"
@@ -35,18 +39,29 @@ echo "Arguments: $@"
 
 # Function to get latest Run.ai version
 get_latest_runai_version() {
-    # Add the helm repo if not already added
-    if ! log_command "helm repo add runai-backend https://runai.jfrog.io/artifactory/cp-charts-prod" "Add Run.ai backend Helm repo"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to add runai-backend helm repo, continuing...${NC}"
-    fi
-    
-    # Update helm repos
+    case "${RUNAI_ARTIFACT_SOURCE:-jfrog}" in
+        ngc)
+            if ! runai_ngc_add_repo; then
+                return 1
+            fi
+            ;;
+        jfrog)
+            if ! runai_jfrog_add_repo; then
+                echo -e "${YELLOW}⚠️ Warning: Failed to add runai-backend helm repo, continuing...${NC}"
+            fi
+            ;;
+    esac
+
     if ! log_command "helm repo update > /dev/null 2>&1" "Update Helm repos"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to update helm repos, continuing...${NC}"
     fi
-    
-    # Get the latest version from helm search
-    local latest_version=$(helm search repo runai-backend --output json | jq -r '.[0].version' 2>/dev/null)
+
+    local latest_version=""
+    if [ "${RUNAI_ARTIFACT_SOURCE:-jfrog}" = "ngc" ]; then
+        latest_version=$(helm search repo runai/control-plane --output json 2>/dev/null | jq -r '[.[] | select(.name == "runai/control-plane")] | first | .version // empty' 2>/dev/null)
+    else
+        latest_version=$(helm search repo runai-backend --output json 2>/dev/null | jq -r '[.[] | select(.name == "runai-backend/control-plane")] | first | .version // empty' 2>/dev/null)
+    fi
     
     if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
         echo -e "${RED}❌ Error: Could not detect latest Run.ai version${NC}"
@@ -63,10 +78,10 @@ show_usage() {
     echo -e "${BLUE}Usage: $0 [OPTIONS]${NC}"
     echo "Options:"
     echo "  --dns DNS_NAME         Specify DNS name for Run.ai certificates"
-    echo "  --runai-version VER    Specify Run.ai version to install (use 'latest' for newest version)"
+    echo "  --runai-version VER    Run:ai version (use 'latest' to resolve from Helm; requires working Helm repo / NGC key when using --ngc)"
     echo "  --cluster-only         Skip backend installation and only install Run.ai cluster"
     echo "  --internal-dns         Configure internal DNS (requires --ip)"
-    echo "  --ip IP_ADDRESS        Required if --internal-dns or --patch-nginx is set"
+    echo "  --ip IP_ADDRESS        Required if --internal-dns, --patch-nginx, or --patch-haproxy is set"
     echo "  --cert CERT_FILE       Use provided certificate file instead of generating self-signed"
     echo "  --key KEY_FILE         Use provided key file instead of generating self-signed"
     echo "  --cacert CA_CERT_FILE  Use provided CA certificate file (e.g., rootCA.pem)"
@@ -74,6 +89,13 @@ show_usage() {
     echo "  --knative              Install Knative serving"
     echo "  --nginx                Install Nginx Ingress Controller (no --ip needed)"
     echo "  --patch-nginx          Patch existing Nginx Ingress Controller with external IP (requires --ip)"
+    echo "  --haproxy              Install HAProxy Kubernetes Ingress (HAProxyTech; NodePorts 32080/32443)"
+    echo "  --patch-haproxy        Patch HAProxy Ingress service with external IP (requires --ip)"
+    echo "  --use-haproxy          Control plane Helm: --set global.ingress.ingressClass=haproxy (required for full Run.ai install)"
+    echo "  --use-nginx            Control plane Helm: --set global.ingress.ingressClass=nginx (required for full Run.ai install)"
+    echo "  --ngc                  Use NVIDIA NGC for control-plane Helm chart (requires NGC API key)"
+    echo "  --jfrog                Use JFrog for control-plane Helm chart (default if neither --ngc nor --jfrog)"
+    echo "  --ngc-api-key KEY      NGC API key (Helm repo + nvcr.io pull secret; or set env NGC_API_KEY)"
     echo "  --prometheus           Install Prometheus Stack"
     echo "  --gpu-operator         Install NVIDIA GPU Operator"
     echo "  --training             Install Kubeflow Training Operator"
@@ -93,33 +115,33 @@ show_usage() {
     echo ""
     echo "Examples:"
     echo "  # Using sslip.io (automatic DNS resolution)"
-    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --repo-secret /root/jfrog"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --repo-secret /root/jfrog"
     echo ""
     echo "  # Using custom domain with internal DNS"
-    echo "  $0 --dns kirson.runai.lab --internal-dns --ip 172.21.140.20 --runai-version 2.20.22 --repo-secret /root/jfrog"
+    echo "  $0 --dns kirson.runai.lab --internal-dns --ip 172.21.140.20 --runai-version 2.20.22 --use-haproxy --repo-secret /root/jfrog"
     echo ""
     echo "  # Using custom certificates"
-    echo "  $0 --dns kirson.rudnai.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret /root/jfrog"
+    echo "  $0 --dns kirson.rudnai.lab --runai-version 2.20.22 --use-nginx --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret /root/jfrog"
     echo ""
     echo "  # Using custom certificates with CA cert"
-    echo "  $0 --dns kirson.runai.lab --runai-version 2.20.22 --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem --repo-secret /root/jfrog"
+    echo "  $0 --dns kirson.runai.lab --runai-version 2.20.22 --use-nginx --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem --repo-secret /root/jfrog"
     echo ""
-    echo "  # Installing with additional components"
-    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --nginx --prometheus --gpu-operator --training --lws --install-sc --repo-secret /root/jfrog"
+    echo "  # Installing with additional components (optional: --nginx / --haproxy to deploy an ingress controller)"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --training --lws --install-sc --repo-secret /root/jfrog"
     echo ""
-    echo "  # Patching existing Nginx installation"
-    echo "  $0 --dns 192.168.0.100.sslip.io --ip 192.168.0.214 --patch-nginx --repo-secret /root/jfrog"
+    echo "  # Patching existing Nginx installation (optional; --ip only needed for the patch)"
+    echo "  $0 --dns 192.168.0.100.sslip.io --ip 192.168.0.214 --use-nginx --patch-nginx --repo-secret /root/jfrog"
     echo ""
     echo "  # Air-gapped installation (no --runai-version needed)"
-    echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com"
+    echo "  $0 --dns 192.168.0.100.sslip.io --use-nginx --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com"
     echo "  # Air-gapped installation with skip-upload (images already in registry)"
-    echo "  $0 --dns 192.168.0.100.sslip.io --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com --skip-upload"
+    echo "  $0 --dns 192.168.0.100.sslip.io --use-haproxy --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com --skip-upload"
     echo ""
     echo "  # Install prerequisites only (without Run.ai)"
     echo "  $0 --install-only --nginx --knative --lws --install-sc"
     echo ""
     echo "  # Label specific nodes for Run.ai system services"
-    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --label server1,server2 --repo-secret /root/jfrog"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --label server1,server2 --repo-secret /root/jfrog"
     echo ""
     echo "  # Uninstall Run.ai completely"
     echo "  $0 --uninstall"
@@ -143,13 +165,30 @@ validate_params() {
         echo -e "${RED}Error: --runai-version is required (unless using --air-gapped or --install-only mode)${NC}"
         show_usage
     fi
+
+    # NGC/JFrog and API key must be validated before resolving --runai-version latest (Helm needs the key).
+    if [ "${NGC_FLAG_COUNT:-0}" -gt 0 ] && [ "${JFROG_FLAG_COUNT:-0}" -gt 0 ]; then
+        echo -e "${RED}Error: use only one of --ngc or --jfrog${NC}"
+        show_usage
+    fi
+
+    if [ "${RUNAI_ARTIFACT_SOURCE:-jfrog}" = "ngc" ] && [ "$AIR_GAPPED_MODE" != true ] && [ "$INSTALL_ONLY" != true ] && [ -z "${NGC_API_KEY:-}" ]; then
+        echo -e "${RED}Error: --ngc requires an NGC API key (pass --ngc-api-key or set env NGC_API_KEY)${NC}"
+        show_usage
+    fi
     
     # Handle "latest" version option
     if [ "$RUNAI_VERSION" = "latest" ]; then
         echo -e "${BLUE}Latest version requested, detecting latest available version...${NC}"
         RUNAI_VERSION=$(get_latest_runai_version)
         if [ $? -ne 0 ]; then
-            echo -e "${RED}❌ Failed to detect latest version${NC}"
+            echo -e "${RED}❌ Failed to dete{NC}"
+            exit 1
+        fi
+        # If any Helm noise leaked into stdout, keep only the first semver token.
+        RUNAI_VERSION="$(printf '%s' "$RUNAI_VERSION" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+        if [ -z "$RUNAI_VERSION" ]; then
+            echo -e "${RED}❌ Could not parse version from latest detection${NC}"
             exit 1
         fi
         echo -e "${GREEN}✅ Latest Run.ai version detected: $RUNAI_VERSION${NC}"
@@ -157,6 +196,18 @@ validate_params() {
 
     if [ "$INTERNAL_DNS" = true ] && [ -z "$IP_ADDRESS" ]; then
         echo -e "${RED}Error: --ip is required when using --internal-dns${NC}"
+        show_usage
+    fi
+
+    if [ "$PATCH_HAPROXY" = true ] && [ -z "$IP_ADDRESS" ]; then
+        echo -e "${RED}Error: --ip is required when using --patch-haproxy${NC}"
+        show_usage
+    fi
+
+    # Full Run.ai install requires control-plane ingress class (--use-haproxy or --use-nginx).
+    # Installing/patching ingress controllers (--nginx, --haproxy, --patch-*) is optional.
+    if [ -z "${RUNAI_INGRESS_CLASS:-}" ]; then
+        echo -e "${RED}Error: pass --use-haproxy or --use-nginx (control plane global.ingress.ingressClass)${NC}"
         show_usage
     fi
 
@@ -194,7 +245,7 @@ validate_params() {
 # Function to load environment variables
 load_env() {
     # Create logs directory
-    LOGS_DIR="./logs"
+    LOGS_DIR="$(pwd)/logs"
     mkdir -p "$LOGS_DIR"
     LOG_FILE="$LOGS_DIR/installation_$(date +%Y%m%d_%H%M%S).log"
     echo "Installation started at $(date)" > "$LOG_FILE"
@@ -208,6 +259,8 @@ load_env() {
     export GREEN YELLOW BLUE RED NC
     export LOGS_DIR LOG_FILE
     export TEMP_DIR="/tmp"
+    export RUNAI_INGRESS_CLASS
+    export NGC_API_KEY
     
     # Initialize boolean flags (only if not already set)
     UNINSTALL=${UNINSTALL:-false}
@@ -217,6 +270,18 @@ load_env() {
     INSTALL_KNATIVE=${INSTALL_KNATIVE:-false}
     INSTALL_NGINX=${INSTALL_NGINX:-false}
     PATCH_NGINX=${PATCH_NGINX:-false}
+    INSTALL_HAPROXY=${INSTALL_HAPROXY:-false}
+    PATCH_HAPROXY=${PATCH_HAPROXY:-false}
+    RUNAI_ARTIFACT_SOURCE=${RUNAI_ARTIFACT_SOURCE:-jfrog}
+    NGC_FLAG_COUNT=${NGC_FLAG_COUNT:-0}
+    JFROG_FLAG_COUNT=${JFROG_FLAG_COUNT:-0}
+    NGC_API_KEY=${NGC_API_KEY:-}
+    # Normalize NGC key once (copy/paste quotes, CR/LF) so Helm and curl see the same value as kubectl secrets.
+    if [ -n "${NGC_API_KEY:-}" ]; then
+        NGC_API_KEY="$(printf '%s' "$NGC_API_KEY" | tr -d '\r\n' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g; s/^"//; s/"$//')"
+        export NGC_API_KEY
+    fi
+    RUNAI_INGRESS_CLASS=${RUNAI_INGRESS_CLASS:-}
     INSTALL_PROMETHEUS=${INSTALL_PROMETHEUS:-false}
     INSTALL_GPU_OPERATOR=${INSTALL_GPU_OPERATOR:-false}
     INSTALL_TRAINING=${INSTALL_TRAINING:-false}
@@ -320,6 +385,44 @@ while [[ $# -gt 0 ]]; do
             PATCH_NGINX=true
             shift
             ;;
+        --haproxy)
+            INSTALL_HAPROXY=true
+            shift
+            ;;
+        --patch-haproxy)
+            PATCH_HAPROXY=true
+            shift
+            ;;
+        --use-haproxy)
+            if [ -n "${RUNAI_INGRESS_CLASS:-}" ] && [ "$RUNAI_INGRESS_CLASS" != "haproxy" ]; then
+                echo -e "${RED}Error: cannot use both --use-haproxy and --use-nginx${NC}"
+                exit 1
+            fi
+            RUNAI_INGRESS_CLASS=haproxy
+            shift
+            ;;
+        --use-nginx)
+            if [ -n "${RUNAI_INGRESS_CLASS:-}" ] && [ "$RUNAI_INGRESS_CLASS" != "nginx" ]; then
+                echo -e "${RED}Error: cannot use both --use-haproxy and --use-nginx${NC}"
+                exit 1
+            fi
+            RUNAI_INGRESS_CLASS=nginx
+            shift
+            ;;
+        --ngc)
+            RUNAI_ARTIFACT_SOURCE=ngc
+            NGC_FLAG_COUNT=$(( ${NGC_FLAG_COUNT:-0} + 1 ))
+            shift
+            ;;
+        --jfrog)
+            RUNAI_ARTIFACT_SOURCE=jfrog
+            JFROG_FLAG_COUNT=$(( ${JFROG_FLAG_COUNT:-0} + 1 ))
+            shift
+            ;;
+        --ngc-api-key)
+            NGC_API_KEY="$2"
+            shift 2
+            ;;
         --prometheus)
             INSTALL_PROMETHEUS=true
             shift
@@ -407,8 +510,7 @@ if [ "$UNINSTALL" = true ]; then
     
     # Check if the original uninstall script exists
     if [ -f "./sanity-check/full-runai-delete.sh" ]; then
-        echo -e "${BLUE}Running full Run.ai uninstall script...${NC}"
-        bash ./sanity-check/full-runai-delete.sh
+        echo -e "${BLUE}Running full Run.ai uninstall script...${ bash ./sanity-check/full-runai-delete.sh
         exit $?
     else
         echo -e "${RED}❌ Error: Full uninstall script not found at ./sanity-check/full-runai-delete.sh${NC}"
@@ -489,6 +591,13 @@ elif [ "$PATCH_NGINX" = true ]; then
     patch_nginx_service
 fi
 
+source ./modules/haproxy.sh
+if [ "$INSTALL_HAPROXY" = true ]; then
+    install_haproxy
+elif [ "$PATCH_HAPROXY" = true ]; then
+    patch_haproxy_service
+fi
+
 source ./modules/prerequisites.sh
 if [ "$INSTALL_PROMETHEUS" = true ]; then
     install_prometheus
@@ -527,7 +636,7 @@ else
     echo -e "${BLUE}Configuring Run.ai node roles...${NC}"
     if [ -f "./modules/node-labeling.sh" ]; then
         source ./modules/node-labeling.sh
-        if handle_runai_node_labeling "$LABEL_NODES"; then
+        if handle_runai_node_labeling "$LABELn
             echo -e "${GREEN}✅ Run.ai node labeling completed successfully${NC}"
         else
             echo -e "${YELLOW}⚠️ Run.ai node labeling completed with warnings${NC}"
@@ -550,7 +659,22 @@ else
 
     # Only install Run.ai if not in air-gapped mode (air-gapped handles its own installation)
     if [ "$AIR_GAPPED_MODE" != true ]; then
-        source ./modules/runai.sh
+        if [ ! -r "./modules/runai.sh" ]; then
+            echo -e "${RED}❌ modules/runai.sh not found or not readable${NC}"
+            exit 1
+        fi
+        # Strip CR (Windows) so function names are not broken.
+        _runai_mod="$(mktemp "${TMPDIR:-/tmp}/runai-installer-runai.XXXXXX")" || exit 1
+        sed 's/\r$//' ./modules/runai.sh >"$_runai_mod" || { rm -f "$_runai_mod"; exit 1; }
+        # shellcheck source=/dev/null
+        source "$_runai_mod" || { rm -f "$_runai_mod"; echo -e "${RED}❌ Failed to load modules/runai.sh${NC}"; exit 1; }
+        rm -f "$_runai_mod"
+        if ! declare -F install_runai >/dev/null 2>&1; then
+            echo -e "${RED}❌ install_runai is not defined after loading modules/runai.sh.${NC}"
+            echo -e "${YELLOW}On Windows editors: run dos2unix modules/runai.sh or save with LF line endings.${NC}"
+            echo -e "${YELLOW}Confirm modules/runai.sh is complete, not truncated.${NC}"
+            exit 1
+        fi
         install_runai
     fi
 
@@ -583,9 +707,9 @@ echo -e "Install Mode: $([ "$INSTALL_ONLY" = true ] && echo "Prerequisites Only"
 echo -e "DNS Name: $DNS_NAME"
 echo -e "Run.ai Version: $RUNAI_VERSION"
 echo -e "Cluster Only: $([ "$CLUSTER_ONLY" = true ] && echo "Yes" || echo "No")"
-echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || echo "No")"
-echo -e "Install Nginx: $([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No")"
-echo -e "Patch Nginx: $([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")"
+echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || ech&& echo "Yes" || echo "No")"
+echo -e "Control-plane chart source: ${RUNAI_ARTIFACT_SOURCE:-jfrog}"
+echo -e "Control-plane ingress class (--use-haproxy / --use-nginx): ${RUNAI_INGRESS_CLASS:-not set}"
 echo -e "Install Prometheus: $([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")"
 echo -e "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"
 echo -e "Install Training Operator: $([ "$INSTALL_TRAINING" = true ] && echo "Yes" || echo "No")"
@@ -615,6 +739,7 @@ if [ "$INSTALL_ONLY" = true ]; then
     echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
     echo -e "\n${BLUE}Installed components:${NC}"
     [ "$INSTALL_NGINX" = true ] && echo -e "  ${GREEN}✅ Nginx Ingress Controller${NC}"
+    [ "$INSTALL_HAPROXY" = true ] && echo -e "  ${GREEN}✅ HAProxy Kubernetes Ingress${NC}"
     [ "$INSTALL_KNATIVE" = true ] && echo -e "  ${GREEN}✅ Knative Serving${NC}"
     [ "$INSTALL_LWS" = true ] && echo -e "  ${GREEN}✅ Local Workload Service (LWS)${NC}"
     [ "$INSTALL_STORAGE_CLASS" = true ] && echo -e "  ${GREEN}✅ Storage Class${NC}"
@@ -624,11 +749,7 @@ if [ "$INSTALL_ONLY" = true ]; then
     echo
 else
     # Full Run.ai installation message
-    echo -e "\n${GREEN}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║                                                                       ║${NC}"
-    echo -e "${GREEN}║              Installation Completed Successfully!                     ║${NC}"
-    echo -e "${GREEN}║                                                                       ║${NC}"
-    echo -e "${GREEN}╚═══════════════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "\n${GREEN}╔════════════════════════════â══════════════════════════════════════════════════════════════════╝${NC}"
     echo -e "\n${BLUE}You can access Run.ai at: ${GREEN}https://$DNS_NAME${NC}"
     echo -e "${BLUE}Default credentials: ${GREEN}test@run.ai / Abcd!234${NC}\n"
 
@@ -647,3 +768,4 @@ else
 fi
 
 echo -e "${BLUE}Thank you for using the AI Factory One-Click Installer!${NC}" 
+
