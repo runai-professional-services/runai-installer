@@ -9,6 +9,13 @@ runai_ngc_apply_image_pull_secrets() {
         echo -e "${RED}❌ NGC_API_KEY is required for --ngc (nvcr.io pull secret)${NC}" >&2
         return 1
     fi
+    # Same normalization as runai_ngc_add_repo / installer load_env
+    NGC_API_KEY="$(printf '%s' "$NGC_API_KEY" | tr -d '\r\n' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g; s/^"//; s/"$//')"
+    if [ -z "${NGC_API_KEY:-}" ]; then
+        echo -e "${RED}❌ NGC_API_KEY is empty after normalization${NC}" >&2
+        return 1
+    fi
+    export NGC_API_KEY
 
     # Email is not used for nvcr.io auth; NVIDIA examples use a placeholder (e.g. test@run.ai).
     local email="test@run.ai"
@@ -24,17 +31,23 @@ runai_ngc_apply_image_pull_secrets() {
     local ns
     for ns in runai-backend runai; do
         kubectl create namespace "$ns" 2>/dev/null || true
+        # Run kubectl apply with stderr to terminal on failure so errors are visible (not only in LOG_FILE).
+        local apply_err
+        apply_err=$(mktemp "${TMPDIR:-/tmp}/ngc-secret-err.XXXXXX")
         if ! kubectl create secret docker-registry runai-reg-creds \
             --docker-server=https://nvcr.io \
             --docker-username='$oauthtoken' \
             --docker-password="$NGC_API_KEY" \
             --docker-email="$email" \
             --namespace="$ns" \
-            --dry-run=client -o yaml | kubectl apply -f - >>"$LOG_FILE" 2>&1; then
+            --dry-run=client -o yaml | kubectl apply -f - >>"$LOG_FILE" 2>"$apply_err"; then
             echo "Status: FAILED (namespace $ns)" >>"$LOG_FILE"
+            if [ -s "$apply_err" ]; then cat "$apply_err" >>"$LOG_FILE"; echo -e "${RED}kubectl: $(cat "$apply_err")${NC}" >&2; fi
+            rm -f "$apply_err"
             echo -e "${RED}❌ Failed to apply runai-reg-creds in namespace $ns${NC}" >&2
             return 1
         fi
+        rm -f "$apply_err"
         echo "Status: SUCCESS (namespace $ns)" >>"$LOG_FILE"
     done
 

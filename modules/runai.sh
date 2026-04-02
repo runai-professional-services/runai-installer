@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# Create namespaces at the very beginning
-kubectl create namespace runai 2>/dev/null || true
-kubectl create namespace runai-backend 2>/dev/null || true
-
 # Function to create namespaces
 create_namespaces() {
     echo -e "${BLUE}Creating namespaces...${NC}"
@@ -117,10 +113,49 @@ check_auth_service() {
     return 1
 }
 
+# Register cluster in control plane API if missing (idempotent; safe to re-run).
+ensure_cluster_registered() {
+    local clusters_json
+    clusters_json=$(curl --insecure --silent -X GET \
+        "https://$control_plane_domain/api/v1/clusters" \
+        -H 'accept: application/json' \
+        -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json') || return 1
+    uuid=$(echo "$clusters_json" | jq -r ".[] | select(.name | contains(\"$cluster_name\")) | .uuid" | head -1)
+    if [ -n "$uuid" ] && [ "$uuid" != "null" ]; then
+        echo -e "${GREEN}✅ Cluster $cluster_name already registered (uuid=$uuid); skipping create.${NC}"
+        return 0
+    fi
+    echo -e "${BLUE}Creating cluster $cluster_name...${NC}"
+    if ! log_command "curl --insecure --silent -X POST \"https://$control_plane_domain/api/v1/clusters\" -H 'accept: application/json' -H \"Authorization: Bearer $token\" -H 'Content-Type: application/json' -d '{\"name\": \"${cluster_name}\", \"version\": \"${cluster_version}\"}'" "Create cluster"; then
+        return 1
+    fi
+    clusters_json=$(curl --insecure --silent -X GET \
+        "https://$control_plane_domain/api/v1/clusters" \
+        -H 'accept: application/json' \
+        -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json') || return 1
+    uuid=$(echo "$clusters_json" | jq -r ".[] | select(.name | contains(\"$cluster_name\")) | .uuid" | head -1)
+    if [ -z "$uuid" ] || [ "$uuid" = "null" ]; then
+        echo -e "${RED}❌ Could not resolve cluster UUID after create${NC}" >&2
+        return 1
+    fi
+    return 0
+}
+
 # Function to install Run.ai
 install_runai() {
     # Create namespaces first
     create_namespaces
+
+    # NGC: docker-registry secret for nvcr.io (required for image pulls; full install and cluster-only)
+    if [ "${RUNAI_ARTIFACT_SOURCE:-jfrog}" = ngc ] && [ "${AIR_GAPPED_MODE:-false}" != true ]; then
+        echo -e "${BLUE}Applying NGC nvcr.io pull secret (runai-reg-creds)...${NC}"
+        if ! runai_ngc_apply_image_pull_secrets; then
+            echo -e "${RED}❌ NGC image pull secret setup failed${NC}"
+            exit 1
+        fi
+    fi
 
     # If not in cluster-only mode, install the backend
     if [ "$CLUSTER_ONLY" != true ]; then
@@ -137,23 +172,42 @@ install_runai() {
             fi
         fi
 
-        # Install Run.ai backend
-        echo -e "${BLUE}Installing Run.ai backend...${NC}"
-        if ! log_command "helm repo add runai-backend https://runai.jfrog.io/artifactory/cp-charts-prod" "Add Run.ai backend Helm repo"; then
-            echo -e "${YELLOW}⚠️ Warning: Failed to add runai-backend helm repo, continuing...${NC}"
-        fi
+        # Install Run.ai backend (JFrog or NGC)
+        echo -e "${BLUE}Installing Run.ai backend (artifact source: ${RUNAI_ARTIFACT_SOURCE:-jfrog})...${NC}"
+        case "${RUNAI_ARTIFACT_SOURCE:-jfrog}" in
+            ngc)
+                if ! runai_ngc_add_repo; then
+                    echo -e "${RED}❌ Failed to add NGC Helm repo${NC}"
+                    exit 1
+                fi
+                ;;
+            jfrog)
+                if ! runai_jfrog_add_repo; then
+                    echo -e "${YELLOW}⚠️ Warning: Failed to add runai-backend helm repo, continuing...${NC}"
+                fi
+                ;;
+        esac
         if ! log_command "helm repo update > /dev/null 2>&1" "Update Helm repos"; then
             echo -e "${YELLOW}⚠️ Warning: Failed to update helm repos, continuing...${NC}"
         fi
 
-        # Set Helm install options based on certificate configuration
+        local CP_CHART
+        case "${RUNAI_ARTIFACT_SOURCE:-jfrog}" in
+            ngc) CP_CHART=$(runai_ngc_control_plane_chart) ;;
+            *) CP_CHART=$(runai_jfrog_control_plane_chart) ;;
+        esac
+
         HELM_OPTS="--set global.domain=$DNS_NAME"
         if [ "$NO_CERT" != true ]; then
             HELM_OPTS="$HELM_OPTS --set global.customCA.enabled=true"
         fi
+        if [ -n "${RUNAI_INGRESS_CLASS:-}" ]; then
+            HELM_OPTS="$HELM_OPTS --set global.ingress.ingressClass=$RUNAI_INGRESS_CLASS"
+        elif [ "${INSTALL_HAPROXY:-false}" = true ]; then
+            HELM_OPTS="$HELM_OPTS --set global.ingress.ingressClass=haproxy"
+        fi
 
-        # Use --output json to suppress normal output and redirect stderr to /dev/null
-        if ! log_command "helm install runai-backend -n runai-backend runai-backend/control-plane --version \"$RUNAI_VERSION\" $HELM_OPTS > /dev/null 2>&1" "Install Run.ai backend"; then
+        if ! log_command "helm upgrade --install runai-backend -n runai-backend $CP_CHART --version \"$RUNAI_VERSION\" $HELM_OPTS > /dev/null 2>&1" "Install Run.ai backend"; then
             echo -e "${RED}❌ Failed to install Run.ai backend${NC}"
             exit 1
         else
@@ -195,19 +249,10 @@ install_runai() {
             exit 1
         fi
 
-        # Create cluster and get UUID
-        echo -e "${BLUE}Creating cluster...${NC}"
-        if ! log_command "curl --insecure --silent -X 'POST' \"https://$control_plane_domain/api/v1/clusters\" -H 'accept: application/json' -H \"Authorization: Bearer $token\" -H 'Content-Type: application/json' -d '{\"name\": \"${cluster_name}\", \"version\": \"${cluster_version}\"}'" "Create cluster"; then
-            echo -e "${RED}❌ Failed to create cluster${NC}"
+        if ! ensure_cluster_registered; then
+            echo -e "${RED}❌ Failed to register cluster in control plane${NC}"
             exit 1
         fi
-
-        # Get UUID
-        uuid=$(curl --insecure --silent -X 'GET' \
-            "https://$control_plane_domain/api/v1/clusters" \
-            -H 'accept: application/json' \
-            -H "Authorization: Bearer $token" \
-            -H 'Content-Type: application/json' | jq ".[] | select(.name | contains(\"$cluster_name\"))" | jq -r .uuid)
 
         # Get installation string
         echo -e "${BLUE}Getting installation information...${NC}"
@@ -226,7 +271,8 @@ install_runai() {
             sleep 5
         done
     else
-        # If in cluster-only mode, we need to checke "${BLUE}Running in cluster-only mode, checking existing backend configuration...${NC}"
+        # If in cluster-only mode, we need to check the existing backend configuration
+        echo -e "${BLUE}Running in cluster-only mode, checking existing backend configuration...${NC}"
 
         # Check if runai-backend is installed and get its configuration
         if helm get values runai-backend -n runai-backend &>/dev/null; then
@@ -291,19 +337,10 @@ install_runai() {
             exit 1
         fi
 
-        # Create cluster and get UUID
-        echo -e "${BLUE}Creating cluster...${NC}"
-        if ! log_command "curl --insecure --silent -X 'POST' \"https://$control_plane_domain/api/v1/clusters\" -H 'accept: application/json' -H \"Authorization: Bearer $token\" -H 'Content-Type: application/json' -d '{\"name\": \"${cluster_name}\", \"version\": \"${cluster_version}\"}'" "Create cluster"; then
-            echo -e "${RED}❌ Failed to create cluster${NC}"
+        if ! ensure_cluster_registered; then
+            echo -e "${RED}❌ Failed to register cluster in control plane${NC}"
             exit 1
         fi
-
-        # Get UUID
-        uuid=$(curl --insecure --silent -X 'GET' \
-            "https://$control_plane_domain/api/v1/clusters" \
-            -H 'accept: application/json' \
-            -H "Authorization: Bearer $token" \
-            -H 'Content-Type: application/json' | jq ".[] | select(.name | contains(\"$cluster_name\"))" | jq -r .uuid)
 
         # Get installation string
         echo -e "${BLUE}Getting installation information...${NC}"

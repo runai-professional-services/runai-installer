@@ -95,7 +95,10 @@ show_usage() {
     echo "  --use-nginx            Control plane Helm: --set global.ingress.ingressClass=nginx (required for full Run.ai install)"
     echo "  --ngc                  Use NVIDIA NGC for control-plane Helm chart (requires NGC API key)"
     echo "  --jfrog                Use JFrog for control-plane Helm chart (default if neither --ngc nor --jfrog)"
-    echo "  --ngc-api-key KEY      NGC API key (Helm repo + nvcr.io pull secret; or set env NGC_API_KEY)"
+    echo "  --ngc-api-key KEY      NGC API key: Helm repo auth + docker-registry secret runai-reg-creds for nvcr.io"
+    echo "                         (same as: kubectl create secret docker-registry runai-reg-creds --docker-server=https://nvcr.io"
+    echo "                         --docker-username='\$oauthtoken' --docker-password=KEY --docker-email=test@run.ai -n runai-backend)"
+    echo "                         Or export NGC_API_KEY and use: --ngc --ngc-api-key \"\$NGC_API_KEY\""
     echo "  --prometheus           Install Prometheus Stack"
     echo "  --gpu-operator         Install NVIDIA GPU Operator"
     echo "  --training             Install Kubeflow Training Operator"
@@ -125,6 +128,9 @@ show_usage() {
     echo ""
     echo "  # Using custom certificates with CA cert"
     echo "  $0 --dns kirson.runai.lab --runai-version 2.20.22 --use-nginx --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem --repo-secret /root/jfrog"
+    echo ""
+    echo "  # NGC (connected): chart + nvcr.io pull secret runai-reg-creds (pass key or set env NGC_API_KEY)"
+    echo "  $0 --dns runai.example.com --runai-version 2.20.22 --use-haproxy --haproxy --ngc --ngc-api-key \"\$NGC_API_KEY\""
     echo ""
     echo "  # Installing with additional components (optional: --nginx / --haproxy to deploy an ingress controller)"
     echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --training --lws --install-sc --repo-secret /root/jfrog"
@@ -182,7 +188,7 @@ validate_params() {
         echo -e "${BLUE}Latest version requested, detecting latest available version...${NC}"
         RUNAI_VERSION=$(get_latest_runai_version)
         if [ $? -ne 0 ]; then
-            echo -e "${RED}❌ Failed to dete{NC}"
+            echo -e "${RED}❌ Failed to detect latest version${NC}"
             exit 1
         fi
         # If any Helm noise leaked into stdout, keep only the first semver token.
@@ -419,7 +425,15 @@ while [[ $# -gt 0 ]]; do
             JFROG_FLAG_COUNT=$(( ${JFROG_FLAG_COUNT:-0} + 1 ))
             shift
             ;;
+        --ngc-api-key=*)
+            NGC_API_KEY="${1#*=}"
+            shift
+            ;;
         --ngc-api-key)
+            if [ -z "${2:-}" ]; then
+                echo -e "${RED}Error: --ngc-api-key requires a value (e.g. --ngc-api-key \"\$NGC_API_KEY\")${NC}"
+                show_usage
+            fi
             NGC_API_KEY="$2"
             shift 2
             ;;
@@ -510,7 +524,8 @@ if [ "$UNINSTALL" = true ]; then
     
     # Check if the original uninstall script exists
     if [ -f "./sanity-check/full-runai-delete.sh" ]; then
-        echo -e "${BLUE}Running full Run.ai uninstall script...${ bash ./sanity-check/full-runai-delete.sh
+        echo -e "${BLUE}Running full Run.ai uninstall script...${NC}"
+        bash ./sanity-check/full-runai-delete.sh
         exit $?
     else
         echo -e "${RED}❌ Error: Full uninstall script not found at ./sanity-check/full-runai-delete.sh${NC}"
@@ -636,7 +651,7 @@ else
     echo -e "${BLUE}Configuring Run.ai node roles...${NC}"
     if [ -f "./modules/node-labeling.sh" ]; then
         source ./modules/node-labeling.sh
-        if handle_runai_node_labeling "$LABELn
+        if handle_runai_node_labeling "$LABEL_NODES"; then
             echo -e "${GREEN}✅ Run.ai node labeling completed successfully${NC}"
         else
             echo -e "${YELLOW}⚠️ Run.ai node labeling completed with warnings${NC}"
@@ -707,8 +722,15 @@ echo -e "Install Mode: $([ "$INSTALL_ONLY" = true ] && echo "Prerequisites Only"
 echo -e "DNS Name: $DNS_NAME"
 echo -e "Run.ai Version: $RUNAI_VERSION"
 echo -e "Cluster Only: $([ "$CLUSTER_ONLY" = true ] && echo "Yes" || echo "No")"
-echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || ech&& echo "Yes" || echo "No")"
+echo -e "Internal DNS: $([ "$INTERNAL_DNS" = true ] && echo "Yes" || echo "No")"
+echo -e "Install Nginx: $([ "$INSTALL_NGINX" = true ] && echo "Yes" || echo "No")"
+echo -e "Patch Nginx: $([ "$PATCH_NGINX" = true ] && echo "Yes" || echo "No")"
+echo -e "Install HAProxy Ingress: $([ "$INSTALL_HAPROXY" = true ] && echo "Yes" || echo "No")"
+echo -e "Patch HAProxy Ingress: $([ "$PATCH_HAPROXY" = true ] && echo "Yes" || echo "No")"
 echo -e "Control-plane chart source: ${RUNAI_ARTIFACT_SOURCE:-jfrog}"
+if [ "${RUNAI_ARTIFACT_SOURCE:-jfrog}" = ngc ]; then
+    echo -e "NGC API key (Helm + runai-reg-creds): $([ -n "${NGC_API_KEY:-}" ] && echo 'set' || echo 'not set')"
+fi
 echo -e "Control-plane ingress class (--use-haproxy / --use-nginx): ${RUNAI_INGRESS_CLASS:-not set}"
 echo -e "Install Prometheus: $([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")"
 echo -e "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"

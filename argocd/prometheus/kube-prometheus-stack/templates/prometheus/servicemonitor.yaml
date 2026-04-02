@@ -1,0 +1,32 @@
+---
+# Source: kube-prometheus-stack/templates/prometheus/servicemonitor.yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: prometheus-kube-prometheus-prometheus
+  namespace: default
+  labels:
+    app: kube-prometheus-stack-prometheus
+    
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/instance: prometheus
+    app.kubernetes.io/version: "77.2.0"
+    app.kubernetes.io/part-of: kube-prometheus-stack
+    chart: kube-prometheus-stack-77.2.0
+    release: "prometheus"
+    heritage: "Helm"
+spec:
+  
+  selector:
+    matchLabels:
+      app: kube-prometheus-stack-prometheus
+      release: "prometheus"
+      self-monitor: "true"
+  namespaceSelector:
+    matchNames:
+      - "default"
+  endpoints:
+  - port: http-web
+    path: "/metrics"
+  - port: reloader-web
+    path: "/metrics"

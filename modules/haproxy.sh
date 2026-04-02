@@ -2,6 +2,12 @@
 # HAProxy Kubernetes Ingress (HAProxyTech), per NVIDIA Run:ai “Migrate from NGINX to HAProxy Ingress”
 # (Vanilla Kubernetes): https://run-ai-docs.nvidia.com/self-hosted/getting-started/installation/install-using-helm/upgrade
 # Ingress class for Run:ai charts: haproxy (see --use-haproxy in runai-installer.sh).
+#
+# Default Service/NS match: helm upgrade --install haproxy-kubernetes-ingress ... -n haproxy-controller
+# → Service haproxy-kubernetes-ingress in namespace haproxy-controller (override via env if needed).
+
+HAPROXY_NAMESPACE="${HAPROXY_NAMESPACE:-haproxy-controller}"
+HAPROXY_SERVICE_NAME="${HAPROXY_SERVICE_NAME:-haproxy-kubernetes-ingress}"
 
 install_haproxy() {
     echo -e "${BLUE}Installing HAProxy Kubernetes Ingress...${NC}"
@@ -60,17 +66,18 @@ install_haproxy() {
 
 get_haproxy_service_info() {
     local service_name=""
-    local namespace="haproxy-controller"
+    local namespace="$HAPROXY_NAMESPACE"
 
     if ! kubectl get ns "$namespace" &>/dev/null; then
         echo ":"
         return
     fi
 
+    # Prefer the Service name that matches our Helm release (haproxy-kubernetes-ingress) in haproxy-controller.
     local candidate
     for candidate in \
-        haproxy-kubernetes-ingress-kubernetes-ingress \
-        haproxy-kubernetes-ingress; do
+        "$HAPROXY_SERVICE_NAME" \
+        haproxy-kubernetes-ingress-kubernetes-ingress; do
         if kubectl get svc -n "$namespace" "$candidate" &>/dev/null; then
             service_name="$candidate"
             break
@@ -95,21 +102,28 @@ patch_haproxy_service() {
     fi
 
     echo -e "${BLUE}Patching HAProxy Ingress service with external IP: $IP_ADDRESS${NC}"
+    echo -e "${BLUE}Target: ${HAPROXY_NAMESPACE}/${HAPROXY_SERVICE_NAME} (same as --haproxy install)${NC}"
 
-    local service_info
-    service_info=$(get_haproxy_service_info)
-    local service_name
-    service_name=$(echo "$service_info" | cut -d: -f1)
-    local namespace
-    namespace=$(echo "$service_info" | cut -d: -f2)
+    local service_name=""
+    local namespace="$HAPROXY_NAMESPACE"
+
+    # Prefer fixed Service from our Helm install: haproxy-controller / haproxy-kubernetes-ingress
+    if kubectl get svc -n "$namespace" "$HAPROXY_SERVICE_NAME" &>/dev/null; then
+        service_name="$HAPROXY_SERVICE_NAME"
+    else
+        local service_info
+        service_info=$(get_haproxy_service_info)
+        service_name=$(echo "$service_info" | cut -d: -f1)
+        namespace=$(echo "$service_info" | cut -d: -f2)
+    fi
 
     if [ -z "$service_name" ] || [ -z "$namespace" ]; then
-        echo -e "${RED}❌ Error: Could not find HAProxy Ingress service in namespace haproxy-controller${NC}"
-        kubectl get svc -n haproxy-controller 2>/dev/null || echo "No services in haproxy-controller"
+        echo -e "${RED}❌ Error: Could not find HAProxy Ingress service (expected ${HAPROXY_NAMESPACE}/${HAPROXY_SERVICE_NAME})${NC}"
+        kubectl get svc -n "$HAPROXY_NAMESPACE" 2>/dev/null || echo "No services in ${HAPROXY_NAMESPACE}"
         return 1
     fi
 
-    echo -e "${BLUE}Found HAProxy service: $service_name in namespace: $namespace${NC}"
+    echo -e "${BLUE}Patching Service: $namespace/$service_name${NC}"
 
     local current_ip
     current_ip=$(kubectl get svc -n "$namespace" "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
