@@ -981,6 +981,9 @@ automatic_run_preflight_sanity_checks() {
                 return 1
             fi
             unset NGC_KEY_CHECK_QUIET_OK
+            echo -e "${GREEN}Checking NGC Key ->> OK - Passed${NC}"
+        else
+            echo -e "${YELLOW}Checking NGC Key ->> Skipped (not in NGC mode)${NC}"
         fi
         local sc_osp=""
         sc_osp=$(kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}' 2>/dev/null)
@@ -1008,7 +1011,7 @@ automatic_run_preflight_sanity_checks() {
             return 1
         fi
         unset NGC_KEY_CHECK_QUIET_OK
-        echo -e "${GREEN}Checking NGC Key >> OK - Passed${NC}"
+        echo -e "${GREEN}Checking NGC Key ->> OK - Passed${NC}"
     else
         echo -e "${YELLOW}Checking NGC Key ->> Skipped (not in NGC mode)${NC}"
     fi
