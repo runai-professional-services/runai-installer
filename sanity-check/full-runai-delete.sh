@@ -7,22 +7,54 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
+# Non-interactive mode (for runai-installer.sh --uninstall -y)
+UNINSTALL_AUTO_YES=false
+if [ "${RUNAI_AUTO_YES:-false}" = true ] || [ "${RUNAI_AUTO_YES:-0}" = 1 ]; then
+    UNINSTALL_AUTO_YES=true
+fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -y|--yes)
+            UNINSTALL_AUTO_YES=true
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+confirm_or_auto_yes() {
+    local prompt="$1"
+    local mode="${2:-upper}"  # upper => expect Y ; lower => accept y/Y
+    local response=""
+
+    echo -e "${RED}${prompt}${NC}"
+    if [ "$UNINSTALL_AUTO_YES" = true ]; then
+        echo -e "${YELLOW}--yes set: auto-confirming.${NC}"
+        return 0
+    fi
+
+    read -r response
+    if [ "$mode" = "upper" ]; then
+        [[ "$response" = "Y" ]]
+    else
+        [[ "$response" =~ ^[Yy]$ ]]
+    fi
+}
+
 # Initial warning and confirmation
 echo -e "${RED}WARNING: This script will delete all Run.ai resources from your cluster.${NC}"
 echo -e "${RED}This action cannot be undone.${NC}"
 
 # First confirmation
-echo -e "${RED}Are you sure you want to proceed? (Y/N)${NC}"
-read -r response
-if [[ "$response" != "Y" ]]; then
+if ! confirm_or_auto_yes "Are you sure you want to proceed? (Y/N)" "upper"; then
     echo -e "${YELLOW}Operation cancelled.${NC}"
     exit 1
 fi
 
 # Second confirmation
-echo -e "${RED}Are you absolutely sure? This will delete ALL Run.ai resources. (Y/N)${NC}"
-read -r response
-if [[ "$response" != "Y" ]]; then
+if ! confirm_or_auto_yes "Are you absolutely sure? This will delete ALL Run.ai resources. (Y/N)" "upper"; then
     echo -e "${YELLOW}Operation cancelled.${NC}"
     exit 1
 fi
@@ -37,8 +69,23 @@ else
     echo -e "${YELLOW}⚠️ No runaiconfig found or already cleaned up${NC}"
 fi
 
-if kubectl -n runai delete runaiconfig runai --force; then
-    echo -e "${GREEN}✅ Successfully deleted runaiconfig${NC}"
+if kubectl -n runai get runaiconfig runai >/dev/null 2>&1; then
+    # Do not block indefinitely on CR deletion; request async delete and verify briefly.
+    if kubectl -n runai delete runaiconfig runai --force --grace-period=0 --wait=false >/dev/null 2>&1; then
+        for i in {1..10}; do
+            if ! kubectl -n runai get runaiconfig runai >/dev/null 2>&1; then
+                echo -e "${GREEN}✅ Successfully deleted runaiconfig${NC}"
+                break
+            fi
+            sleep 1
+        done
+
+        if kubectl -n runai get runaiconfig runai >/dev/null 2>&1; then
+            echo -e "${YELLOW}⚠️ runaiconfig deletion is still in progress; continuing cleanup to avoid blocking.${NC}"
+        fi
+    else
+        echo -e "${YELLOW}⚠️ Could not issue runaiconfig delete request; continuing cleanup.${NC}"
+    fi
 else
     echo -e "${YELLOW}⚠️ No runaiconfig found or already deleted${NC}"
 fi
@@ -76,10 +123,7 @@ delete_helm_releases() {
 delete_helm_releases
 
 echo -e "${GREEN}✅ Helm cleanup completed${NC}"
-echo -e "${YELLOW}Would you like to continue with full cleanup? [y/N] ${NC}"
-read -r response
-
-if [[ "$response" =~ ^[Yy]$ ]]; then
+if confirm_or_auto_yes "Would you like to continue with full cleanup? [y/N] " "lower"; then
     echo -e "${BLUE}Continuing with full cleanup...${NC}"
     # Function to delete resources with timeout and force if needed
     delete_resource() {

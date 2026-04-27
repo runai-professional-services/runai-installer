@@ -151,7 +151,7 @@ show_usage() {
     echo "  --automatic            Prep cluster, then full Run:ai; supports --dns (override sslip), --cert/--key/--cacert; requires --ngc-api-key (NGC) or --repo-secret (JFrog)"
     echo "  --automatic-chain      Legacy alias; same credential requirements as --automatic"
     echo "  --automatic-stop-after PHASE  Stop after: helm|nodes|prereqs|tests|hardware|haproxy|certs|tls|storage"
-    echo "  -y, --yes              With --automatic: skip plan/install confirmations (CI / unattended)"
+    echo "  -y, --yes              With --automatic: skip plan/install confirmations; with --uninstall: auto-confirm prompts"
     echo "  --ngc-key KEY|-        Set NGC API key for charts/images (implies --ngc). Use - to read key from stdin"
     echo "  --label NODES          Comma-separated list of node names to label for Run.ai system (e.g., server1,server2)"
     echo "  --uninstall            Uninstall Run.ai completely from the cluster"
@@ -200,6 +200,7 @@ show_usage() {
     echo ""
     echo "  # Uninstall Run.ai completely"
     echo "  $0 --uninstall"
+    echo "  $0 --uninstall -y"
     exit 1
 }
 
@@ -681,7 +682,11 @@ if [ "$UNINSTALL" = true ]; then
     # Check if the original uninstall script exists
     if [ -f "./sanity-check/full-runai-delete.sh" ]; then
         echo -e "${BLUE}Running full Run.ai uninstall script...${NC}"
-        bash ./sanity-check/full-runai-delete.sh
+        if [ "${AUTO_YES:-false}" = true ]; then
+            RUNAI_AUTO_YES=true bash ./sanity-check/full-runai-delete.sh --yes
+        else
+            bash ./sanity-check/full-runai-delete.sh
+        fi
         exit $?
     else
         echo -e "${RED}❌ Error: Full uninstall script not found at ./sanity-check/full-runai-delete.sh${NC}"

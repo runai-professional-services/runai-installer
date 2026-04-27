@@ -155,48 +155,39 @@ automatic_print_plan_summary() {
         echo -e "  ${YELLOW}API server:${NC}          ${server_line}"
     fi
     automatic_print_nodes_brief
+    echo ""
     if [ -n "${DNS_NAME:-}" ]; then
         echo -e "  ${YELLOW}TLS DNS override:${NC}     ${GREEN}${DNS_NAME}${NC} (from ${BLUE}--dns${NC})"
     fi
-    # Keep concise capacity lines directly under nodes in the plan banner.
-    automatic_print_cluster_resources_one_line 2>&1
+    # Keep only worker capacity line in the plan banner.
     automatic_print_worker_capacity_one_line 2>&1
+    automatic_print_default_storage_class_one_line 2>&1
     echo ""
     automatic_print_component_status_brief
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
-        echo -e "  ${YELLOW}Target:${NC}  ${GREEN}OpenShift (production)${NC} (detected) — control plane: ${BLUE}--set global.config.kubernetesDistribution=openshift${NC}"
-    fi
-    if automatic_is_ngc_mode; then
-        echo -e "  ${YELLOW}Artifacts:${NC}            ${GREEN}NGC${NC} — Helm charts from ${BLUE}helm.ngc.nvidia.com${NC}, container images from ${BLUE}nvcr.io${NC}"
-        echo -e "  ${YELLOW}Credentials:${NC}          NGC API key is set (${BLUE}--ngc-key${NC}; value not shown)"
-    else
-        echo -e "  ${YELLOW}Artifacts:${NC}            ${GREEN}JFrog${NC} — pass ${BLUE}--ngc-key${NC} to switch to NGC charts/images"
-        if [ -n "${REPO_SECRET:-}" ] && [ -f "${REPO_SECRET}" ]; then
-            echo -e "  ${YELLOW}Credentials:${NC}          ${BLUE}--repo-secret${NC} ${REPO_SECRET}"
-        else
-            echo -e "  ${YELLOW}Credentials:${NC}          set ${BLUE}--repo-secret FILE${NC} for full install (or ${BLUE}--ngc-key${NC} for NGC)"
-        fi
+        automatic_print_openshift_preconfirm_preview
     fi
     echo ""
-    if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
-        echo -e "  ${BLUE}Writes:${NC} ./logs/ · ./logs/automatic-last.env (at end)  ${YELLOW}(no ./certificates/ on OpenShift unless you pass --cert/--key)${NC}"
-    else
-        echo -e "  ${BLUE}Writes:${NC} ./certificates/ · ./logs/ · ./logs/automatic-last.env (at end)"
-    fi
-    echo ""
-    if automatic_has_install_credentials; then
-        echo -e "  ${GREEN}Full Run:ai install:${NC} after prep, install ${GREEN}latest${NC} (or your ${BLUE}--runai-version${NC}) with Helm + credentials"
-    else
-        echo -e "  ${YELLOW}Full Run:ai install:${NC} pass ${BLUE}--ngc-api-key${NC} / ${BLUE}NGC_API_KEY${NC} or ${BLUE}--repo-secret FILE${NC}"
-    fi
-    if [ "${AUTOMATIC_CHAIN:-false}" = true ] && ! automatic_has_install_credentials; then
-        echo -e "  ${YELLOW}Note:${NC} ${BLUE}--automatic-chain${NC} requires NGC API key or ${BLUE}--repo-secret FILE${NC}."
-    fi
+    echo -e "  ${BLUE}Installation plan:${NC}"
+    echo -e "  Installs the latest NVIDIA Run:ai version and runs sanity checks for cluster readiness."
     echo ""
     if [ "${AUTO_YES:-false}" = true ]; then
         echo -e "  ${GREEN}Non-interactive:${NC} ${BLUE}-y${NC} / ${BLUE}--yes${NC} is set (no confirmation prompts for this plan)."
     fi
     echo ""
+}
+
+automatic_print_default_storage_class_one_line() {
+    local sc=""
+    sc=$(kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}' 2>/dev/null)
+    if [ -z "$sc" ]; then
+        sc=$(kubectl get storageclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
+    fi
+    if [ -z "$sc" ]; then
+        echo -e "${BLUE}Default storage class -->${NC} ${YELLOW}not found${NC}" >&2
+    else
+        echo -e "${BLUE}Default storage class -->${NC} ${GREEN}${sc}${NC}" >&2
+    fi
 }
 
 # Stop after a named phase when AUTOMATIC_STOP_AFTER matches (debug / one-step-at-a-time).
@@ -326,6 +317,7 @@ automatic_print_worker_capacity_one_line() {
     fi
 
     local nodes_json workers_json cpu_w mem_w_gib gpu_w
+    local min_cpu=24 min_mem_gib=24 hw_status hw_color
     nodes_json="$(kubectl get nodes -o json 2>/dev/null || true)"
     if [ -z "$nodes_json" ]; then
         return 0
@@ -340,7 +332,19 @@ automatic_print_worker_capacity_one_line() {
     mem_w_gib="$(printf '%s' "$workers_json" | jq -r '[.[].status.capacity.memory | sub("Ki$";"") | tonumber] | add // 0' 2>/dev/null | awk '{printf "%.0f", $1/1024/1024}')"
     gpu_w="$(printf '%s' "$workers_json" | jq -r '[.[].status.capacity["nvidia.com/gpu"] | (tonumber? // 0)] | add // 0' 2>/dev/null || echo "0")"
 
-    echo -e "${BLUE}Total Workers:${NC} ${cpu_w} CPU, ~${mem_w_gib} GiB RAM, ${gpu_w} GPU" >&2
+    [[ "$cpu_w" =~ ^[0-9]+$ ]] || cpu_w=0
+    [[ "$mem_w_gib" =~ ^[0-9]+$ ]] || mem_w_gib=0
+    [[ "$gpu_w" =~ ^[0-9]+$ ]] || gpu_w=0
+
+    if [ "$cpu_w" -ge "$min_cpu" ] && [ "$mem_w_gib" -ge "$min_mem_gib" ]; then
+        hw_status="Passed"
+        hw_color="${GREEN}"
+    else
+        hw_status="Failed"
+        hw_color="${RED}"
+    fi
+
+    echo -e "${BLUE}Total Workers:${NC} ${cpu_w} CPU, ~${mem_w_gib} GiB RAM, ${gpu_w} GPU — ${hw_color}${hw_status}${NC} ${YELLOW}(min ${min_cpu} CPU / ${min_mem_gib} GiB RAM)${NC}" >&2
 }
 
 automatic_print_node_inventory() {
@@ -627,53 +631,37 @@ automatic_print_component_status_brief() {
         echo -e "  ${BLUE}${lbl}${NC} ${YELLOW}missing${NC} (install/refresh in this run)"
     fi
 
-    automatic_probe_stack 2>/dev/null || true
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
-        printf -v lbl "$fmt" "Ingress (HAProxy)"
-        echo -e "  ${BLUE}${lbl}${NC} ${GREEN}N/A (OpenShift)${NC} — not used; no route/ingress preflight in this run"
+        :
     else
-    if automatic_haproxy_ingress_present &>/dev/null; then
-        printf -v lbl "$fmt" "HAProxy Ingress"
-        echo -e "  ${BLUE}${lbl}${NC} ${GREEN}present${NC} (haproxy-controller) — skip redeploy; IP may be re-patched"
-    else
-        printf -v lbl "$fmt" "HAProxy Ingress"
-        echo -e "  ${BLUE}${lbl}${NC} ${YELLOW}missing${NC} (install in this run)"
+        echo -e "  ${BLUE}Optional prerequisites:${NC} missing components are auto-detected and installed as needed."
     fi
-    if [ "$HAVE_PROMETHEUS" = true ]; then
-        printf -v lbl "$fmt" "Prometheus"
-        echo -e "  ${BLUE}${lbl}${NC} ${GREEN}present${NC} (monitoring) — skip install"
-    else
-        printf -v lbl "$fmt" "Prometheus"
-        echo -e "  ${BLUE}${lbl}${NC} ${YELLOW}missing${NC} (install in this run)"
-    fi
-    if [ "$HAVE_GPU" = true ]; then
-        printf -v lbl "$fmt" "GPU Operator"
-        echo -e "  ${BLUE}${lbl}${NC} ${GREEN}present${NC} (gpu-operator) — skip install"
-    else
-        printf -v lbl "$fmt" "GPU Operator"
-        echo -e "  ${BLUE}${lbl}${NC} ${YELLOW}missing${NC} (install in this run)"
-    fi
-    if [ "$HAVE_KNATIVE" = true ]; then
-        printf -v lbl "$fmt" "Knative"
-        echo -e "  ${BLUE}${lbl}${NC} ${GREEN}present${NC} (Knative / knative-serving) — skip install"
-    else
-        printf -v lbl "$fmt" "Knative"
-        echo -e "  ${BLUE}${lbl}${NC} ${YELLOW}missing${NC} (install in this run)"
-    fi
-    fi
-    echo ""
 }
 
-# OpenShift: do not install any operators — report only (production; recommend OperatorHub alignment).
-automatic_install_missing_optional_openshift_components() {
-    echo -e "\n${BLUE}1) Prerequisite stack (OpenShift — production)${NC}"
-    if declare -F runai_openshift_print_recommended_prereq_operators >/dev/null 2>&1; then
+automatic_print_openshift_preconfirm_preview() {
+    if declare -F runai_openshift_nfd_status >/dev/null 2>&1 \
+        && declare -F runai_openshift_gpu_operator_status >/dev/null 2>&1 \
+        && declare -F runai_openshift_knative_serverless_status >/dev/null 2>&1; then
+        local nfd gpu kn
+        nfd="$(runai_openshift_nfd_status)"
+        gpu="$(runai_openshift_gpu_operator_status)"
+        kn="$(runai_openshift_knative_serverless_status)"
+        echo -e "  NFD (Node Feature Discovery)      →  $(runai_openshift__cstatus "$nfd")  ${YELLOW}(prerequisite for GPU Operator)${NC}"
+        echo -e "  NVIDIA GPU Operator               →  $(runai_openshift__cstatus "$gpu")  ${YELLOW}(Run:ai GPU)${NC}"
+        if [ "$kn" = "present" ]; then
+            echo -e "  Knative (OpenShift Serverless)    →  $(runai_openshift__cstatus "$kn")"
+        else
+            echo -e "  Knative (OpenShift Serverless)    →  ${YELLOW}not detected${NC}  - Inference will not work"
+        fi
+    elif declare -F runai_openshift_print_recommended_prereq_operators >/dev/null 2>&1; then
         runai_openshift_print_recommended_prereq_operators
     else
         echo "  (openshift.sh not loaded; cannot list operators)"
     fi
-    printf '    • %bPlatform monitoring / UWM%b — as required by your organization (not changed here)\n' "$BLUE" "$NC"
-    printf '    • %bLWS / Training / Helm Prometheus%b — not auto-installed on OpenShift in this flow\n' "$BLUE" "$NC"
+}
+
+# OpenShift: do not install any operators — report only (production; recommend OperatorHub alignment).
+automatic_install_missing_optional_openshift_components() {
     return 0
 }
 
@@ -684,14 +672,6 @@ automatic_install_missing_optional_components() {
     fi
     automatic_probe_stack
 
-    echo -e "\n${BLUE}Cluster inventory${NC}"
-    echo "  Prometheus   $([ "$HAVE_PROMETHEUS" = true ] && echo -e "${GREEN}ok${NC}" || echo -e "${YELLOW}will install${NC}")"
-    echo "  GPU Operator $([ "$HAVE_GPU" = true ] && echo -e "${GREEN}ok${NC}" || echo -e "${YELLOW}will install${NC}")"
-    echo "  Knative      $([ "$HAVE_KNATIVE" = true ] && echo -e "${GREEN}ok${NC}" || echo -e "${YELLOW}will install${NC}")"
-    echo "  LWS          $([ "$HAVE_LWS" = true ] && echo -e "${GREEN}ok${NC}" || echo -e "${YELLOW}will install${NC}")"
-    echo "  Training Op. $([ "$HAVE_TRAINING" = true ] && echo -e "${GREEN}ok${NC}" || echo -e "${YELLOW}will install${NC}")"
-    echo "  NGINX (info) $([ "$HAVE_NGINX" = true ] && echo -e "${GREEN}present${NC}" || echo -e "${YELLOW}none${NC}")  (Run:ai uses HAProxy here)"
-
     local -a part1_flags=(--install-only)
     [ "$HAVE_PROMETHEUS" = false ] && part1_flags+=(--prometheus)
     [ "$HAVE_GPU" = false ] && part1_flags+=(--gpu-operator)
@@ -700,13 +680,13 @@ automatic_install_missing_optional_components() {
     [ "$HAVE_TRAINING" = false ] && part1_flags+=(--training)
 
     if [ "${#part1_flags[@]}" -gt 1 ]; then
-        echo -e "\n${BLUE}▶ Optional components${NC} ${YELLOW}${part1_flags[*]}${NC}"
+        echo -e "\n${BLUE}Installing optional prerequisites...${NC}"
         if ! automatic_run_sub_installer "${part1_flags[@]}"; then
             echo -e "${RED}❌ install-only prerequisites step failed${NC}" >&2
             return 1
         fi
     else
-        echo -e "\n${GREEN}Optional stack already present${NC} (skipping --install-only extras)."
+        echo -e "\n${GREEN}Optional prerequisites already present${NC}."
     fi
     return 0
 }
@@ -783,12 +763,12 @@ automatic_emit_storage_ingress_summary() {
 
     # Storage class: cluster has a StorageClass + optional PVC test (when preflight ran --storage).
     if [ -z "$sc_probe" ]; then
-        echo -e "${YELLOW}Checking storage class ->> Pending — no StorageClass in cluster (local-path install runs later in --automatic)${NC}"
+        echo -e "${YELLOW}Checking StorageClass ->> Pending — no StorageClass in cluster (local-path install runs later in --automatic)${NC}"
     elif [ "$have_storage" = true ] && [ "$storage_ok" = false ]; then
-        echo -e "${RED}Checking storage class ->> Failed (class: ${sc_probe})${NC}"
+        echo -e "${RED}Checking StorageClass ->> Failed (class: ${sc_probe})${NC}"
         echo -e "${RED}Failed because: PVC / provisioning test failed (see ${LOG_FILE:-${REPO_ROOT}/sanity-check/logs/latest.log})${NC}"
     else
-        echo -e "${GREEN}Checking storage class ->> OK - Passed${NC}"
+        echo -e "${GREEN}Checking StorageClass ->> OK - Passed${NC}"
         if [ -n "$sc_probe" ] && [ "$have_storage" != true ]; then
             echo -e "${BLUE}  (StorageClass ${sc_probe} present — PVC test not in this preflight run.)${NC}"
         fi
@@ -1017,7 +997,6 @@ automatic_run_preflight_sanity_checks() {
     PREINSTALL_STORAGE_RAN=false
 
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
-        echo -e "${BLUE}  OpenShift: preflight is ${GREEN}NGC (if NGC) + StorageClass + PVC${NC} (no hardware or disk; routes are platform-owned).${NC}"
         if automatic_is_ngc_mode; then
             NGC_KEY_CHECK_QUIET_OK=1
             if ! automatic_verify_ngc_api_key; then
@@ -1026,9 +1005,6 @@ automatic_run_preflight_sanity_checks() {
                 return 1
             fi
             unset NGC_KEY_CHECK_QUIET_OK
-            echo -e "${GREEN}Checking NGC Key >> OK - Passed${NC}"
-        else
-            echo -e "${YELLOW}Checking NGC Key ->> Skipped (not in NGC mode)${NC}"
         fi
         local sc_osp=""
         sc_osp=$(kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}' 2>/dev/null)
@@ -1040,7 +1016,6 @@ automatic_run_preflight_sanity_checks() {
             echo -e "\n${GREEN}✅ OpenShift preflight: NGC step done (or skipped); storage test deferred (wait for StorageClass)${NC}"
             return 0
         fi
-        echo -e "${BLUE}  Running: --storage only (class ${sc_osp})${NC}"
         PREINSTALL_STORAGE_RAN=true
         if ! AUTOMATIC_PREFLIGHT_SC_PROBE="$sc_osp" AUTOMATIC_PREFLIGHT_SUMMARY=true automatic_run_sanity_check --storage --class "$sc_osp"; then
             return 1
@@ -1155,12 +1130,11 @@ run_automatic_mode() {
                 echo -e "  Or pass ${BLUE}--dns runai.apps.<cluster-domain>${NC} (NVIDIA: control plane on OpenShift).${NC}" >&2
                 return 1
             fi
-            echo -e "${GREEN}Using Run:ai FQDN:${NC} ${GREEN}${AUTO_DNS}${NC} (override: ${BLUE}--dns${NC})"
+            echo -e "${GREEN}Using Run:ai FQDN:${NC} ${GREEN}${AUTO_DNS}${NC}"
         fi
-        automatic_print_nodes_brief
         AUTO_IP="$(automatic_pick_worker_ip || true)"
-        if [ -n "$AUTO_IP" ]; then
-            echo -e "  ${BLUE}Reference worker IP (for logs, not for HAProxy):${NC} ${GREEN}${AUTO_IP}${NC}" >&2
+        if [ -n "${LOG_FILE:-}" ] && [ -n "$AUTO_IP" ]; then
+            echo "OpenShift automatic: reference worker IP ${AUTO_IP}" >>"$LOG_FILE"
         fi
     else
         nodes_out=$(automatic_list_nodes_and_resolve_ip) || return 1
@@ -1178,15 +1152,12 @@ run_automatic_mode() {
 
     if automatic_stop_maybe nodes; then return 0; fi
 
-    echo -e "\n${BLUE}1) Install Pre-requisites${NC}"
     if ! automatic_install_missing_optional_components; then
         return 1
     fi
     if automatic_stop_maybe prereqs; then return 0; fi
 
-    if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
-        echo -e "\n${BLUE}2) OpenShift preflight: NGC (if NGC) + ${GREEN}StorageClass / PVC only${NC}${BLUE} (no hardware, no disk)${NC}"
-    else
+    if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" != true ]; then
         echo -e "\n${BLUE}2) Sanity check — NGC key and infrastructure${NC}"
     fi
     if ! automatic_run_preflight_sanity_checks "$AUTO_DNS"; then
@@ -1214,7 +1185,9 @@ run_automatic_mode() {
     if automatic_stop_maybe tests; then return 0; fi
 
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
-        echo -e "\n${GREEN}▶ OpenShift: skip HAProxy — we do not install or probe routes/ingress here (see Run:ai docs).${NC}"
+        if [ -n "${LOG_FILE:-}" ]; then
+            echo "OpenShift automatic: skipping HAProxy install/probe (platform Routes)." >>"$LOG_FILE"
+        fi
         kubectl create namespace runai 2>/dev/null || true
         kubectl create namespace runai-backend 2>/dev/null || true
         runai_openshift_label_runai_namespace_psa
@@ -1235,14 +1208,18 @@ run_automatic_mode() {
     fi
     if automatic_stop_maybe haproxy; then return 0; fi
 
-    echo -e "\n${BLUE}▶ TLS certificates (${AUTO_DNS})${NC}"
+    if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" != true ]; then
+        echo -e "\n${BLUE}▶ TLS certificates (${AUTO_DNS})${NC}"
+    fi
     export DNS_NAME="$AUTO_DNS"
     local cert_path key_path ca_path tls_cert_source
     # OpenShift: do not create ./certificates or customCA for the router (NVIDIA/Red Hat); optional --cert/--key for special cases
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ] && [ -z "${CERT_FILE:-}" ] && [ -z "${KEY_FILE:-}" ]; then
         export NO_CERT=true
         tls_cert_source="OpenShift — not created here (use platform/ingress router TLS; full install uses --no-cert)"
-        echo -e "  ${GREEN}Skipping${NC} installer certificate generation — ${BLUE}--no-cert${NC} for the Run:ai install (NVIDIA OCP; no route test here)."
+        if [ -n "${LOG_FILE:-}" ]; then
+            echo "OpenShift automatic: skipping installer certificate generation (--no-cert)." >>"$LOG_FILE"
+        fi
         cert_path=""; key_path=""; ca_path=""
     else
     export NO_CERT=false
@@ -1296,9 +1273,12 @@ run_automatic_mode() {
     if automatic_stop_maybe certs; then return 0; fi
 
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
-        echo -e "\n${BLUE}▶ OpenShift: route / ingress / TLS preflight (skipped)${NC}"
-        echo -e "  ${GREEN}No${NC} HAProxy probe and ${GREEN}no${NC} cluster route test — use your OpenShift and Run:ai runbooks; Run:ai DNS: ${GREEN}${AUTO_DNS}${NC}"
-        echo -e "OpenShift route/ingress preflight ${GREEN}->> Skipped (by design)${NC}"
+        if [ -n "${LOG_FILE:-}" ]; then
+            {
+                echo "OpenShift automatic: route/ingress/TLS preflight skipped by design."
+                echo "OpenShift DNS: ${AUTO_DNS}"
+            } >>"$LOG_FILE"
+        fi
     else
         echo -e "\n${BLUE}▶ TLS / ingress check (sanity-check.sh --use-haproxy)${NC}"
         # SANITY_TLS_FAST: use minimal external TLS check path + faster teardown (see sanity-check run_tls_tests).
@@ -1440,8 +1420,6 @@ run_automatic_mode() {
     echo -e "\n${BLUE}Saved: ${env_file}${NC} (source before a manual full install if useful)"
 
     echo -e "\n${GREEN}✅ Automatic preparation completed.${NC}"
-    echo -e "  TLS DNS used: ${AUTO_DNS}"
-    echo -e "  TLS certificates: ${tls_cert_source}"
     echo -e "  Default StorageClass: ${default_sc}"
 
     # Full Run.ai install after prep when credentials are provided (version = latest from Helm unless --runai-version set).
@@ -1473,7 +1451,9 @@ run_automatic_mode() {
         esac
         [ "${CLUSTER_ONLY:-false}" = true ] && chain+=(--cluster-only)
         [ -n "${LABEL_NODES:-}" ] && chain+=(--label "$LABEL_NODES")
-        echo -e "${BLUE}Running:${NC} ./runai-installer.sh ${chain[*]}"
+        if [ -n "${LOG_FILE:-}" ]; then
+            echo "Running: ./runai-installer.sh ${chain[*]}" >>"$LOG_FILE"
+        fi
         echo -e "${YELLOW}Replay:${NC} same command is saved in ${BLUE}logs/automatic-last.env${NC} (comment at bottom)."
         if ! automatic_run_sub_installer "${chain[@]}"; then
             echo -e "${RED}❌ Full Run.ai install failed${NC}" >&2
