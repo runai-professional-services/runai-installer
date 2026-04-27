@@ -18,6 +18,16 @@
 
 REPO_ROOT="${REPO_ROOT:-$(pwd)}"
 
+for _auto_platform_mod in "$REPO_ROOT/modules/automatic-ocp.sh" "$REPO_ROOT/modules/automatic-vanilla.sh"; do
+    if [ ! -f "$_auto_platform_mod" ]; then
+        echo "❌ Missing ${_auto_platform_mod}" >&2
+        return 1 2>/dev/null || exit 1
+    fi
+    # shellcheck source=/dev/null
+    source "$_auto_platform_mod"
+done
+unset _auto_platform_mod
+
 # HAProxy Service name/namespace must match modules/haproxy.sh (patch_haproxy_service / get_haproxy_service_info).
 automatic_ensure_haproxy_sh_loaded() {
     if [ "${_RUNAI_HAPROXY_SH_LOADED:-false}" = true ]; then
@@ -634,35 +644,18 @@ automatic_print_component_status_brief() {
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
         :
     else
-        echo -e "  ${BLUE}Optional prerequisites:${NC} missing components are auto-detected and installed as needed."
+        echo -e "  ${BLUE}Vanilla checks:${NC} Prometheus, GPU Operator, and HAProxy are auto-detected and installed if missing."
     fi
 }
 
 automatic_print_openshift_preconfirm_preview() {
-    if declare -F runai_openshift_nfd_status >/dev/null 2>&1 \
-        && declare -F runai_openshift_gpu_operator_status >/dev/null 2>&1 \
-        && declare -F runai_openshift_knative_serverless_status >/dev/null 2>&1; then
-        local nfd gpu kn
-        nfd="$(runai_openshift_nfd_status)"
-        gpu="$(runai_openshift_gpu_operator_status)"
-        kn="$(runai_openshift_knative_serverless_status)"
-        echo -e "  NFD (Node Feature Discovery)      →  $(runai_openshift__cstatus "$nfd")  ${YELLOW}(prerequisite for GPU Operator)${NC}"
-        echo -e "  NVIDIA GPU Operator               →  $(runai_openshift__cstatus "$gpu")  ${YELLOW}(Run:ai GPU)${NC}"
-        if [ "$kn" = "present" ]; then
-            echo -e "  Knative (OpenShift Serverless)    →  $(runai_openshift__cstatus "$kn")"
-        else
-            echo -e "  Knative (OpenShift Serverless)    →  ${YELLOW}not detected${NC}  - Inference will not work"
-        fi
-    elif declare -F runai_openshift_print_recommended_prereq_operators >/dev/null 2>&1; then
-        runai_openshift_print_recommended_prereq_operators
-    else
-        echo "  (openshift.sh not loaded; cannot list operators)"
-    fi
+    automatic_ocp_print_preconfirm_preview
 }
 
 # OpenShift: do not install any operators — report only (production; recommend OperatorHub alignment).
 automatic_install_missing_optional_openshift_components() {
-    return 0
+    automatic_ocp_install_missing_optional_components
+    return $?
 }
 
 automatic_install_missing_optional_components() {
@@ -670,25 +663,8 @@ automatic_install_missing_optional_components() {
         automatic_install_missing_optional_openshift_components
         return $?
     fi
-    automatic_probe_stack
-
-    local -a part1_flags=(--install-only)
-    [ "$HAVE_PROMETHEUS" = false ] && part1_flags+=(--prometheus)
-    [ "$HAVE_GPU" = false ] && part1_flags+=(--gpu-operator)
-    [ "$HAVE_KNATIVE" = false ] && part1_flags+=(--knative)
-    [ "$HAVE_LWS" = false ] && part1_flags+=(--lws)
-    [ "$HAVE_TRAINING" = false ] && part1_flags+=(--training)
-
-    if [ "${#part1_flags[@]}" -gt 1 ]; then
-        echo -e "\n${BLUE}Installing optional prerequisites...${NC}"
-        if ! automatic_run_sub_installer "${part1_flags[@]}"; then
-            echo -e "${RED}❌ install-only prerequisites step failed${NC}" >&2
-            return 1
-        fi
-    else
-        echo -e "\n${GREEN}Optional prerequisites already present${NC}."
-    fi
-    return 0
+    automatic_vanilla_install_missing_optional_components
+    return $?
 }
 
 automatic_run_sub_installer() {

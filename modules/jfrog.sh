@@ -11,10 +11,7 @@ runai_maybe_clean_helm_repos_for_artifact_flag() {
         return 0
     fi
 
-    echo -e "${BLUE}Explicit artifact-source flag detected; removing existing Run:ai Helm repos first...${NC}" >&2
-
     local repo_names_json repo_names repo_name
-    echo -e "${BLUE}  (listing Helm repositories; if it hangs, try: helm repo list -o json)${NC}" >&2
     repo_names_json="$(helm repo list -o json 2>/dev/null || true)"
     repo_names="$(printf '%s' "$repo_names_json" | jq -r '.[] | select((.name == "runai") or (.name == "runai-backend") or (.url | test("runai\\.jfrog\\.io|helm\\.ngc\\.nvidia\\.com/nvidia/runai"))) | .name' 2>/dev/null || true)"
 

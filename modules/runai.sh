@@ -66,10 +66,9 @@ runai_inject_openshift_ingress_cacert_for_cluster_if_needed() {
     if [ -z "$cacert" ] || [ ! -f "$cacert" ]; then
         return 0
     fi
-    echo -e "${BLUE}OpenShift: applying default router / Route trust PEM to runai (secret runai-ca-cert) for cluster Helm customCA…${NC}"
     kubectl create namespace runai 2>/dev/null || true
     if ! kubectl create secret generic runai-ca-cert -n runai \
-        --from-file=runai-ca.pem="$cacert" --dry-run=client -o yaml | kubectl apply -f -; then
+        --from-file=runai-ca.pem="$cacert" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1; then
         if [ -n "$auto_tmp" ] && [ "$auto_tmp" = "$cacert" ]; then
             rm -f "$auto_tmp" 2>/dev/null
         fi
@@ -79,7 +78,7 @@ runai_inject_openshift_ingress_cacert_for_cluster_if_needed() {
     # Same trust bundle as create_certificates: backend may read it; must apply before we rm auto_tmp.
     kubectl create namespace runai-backend 2>/dev/null || true
     if ! kubectl create secret generic runai-ca-cert -n runai-backend \
-        --from-file=runai-ca.pem="$cacert" --dry-run=client -o yaml | kubectl apply -f -; then
+        --from-file=runai-ca.pem="$cacert" --dry-run=client -o yaml | kubectl apply -f - >/dev/null 2>&1; then
         echo -e "${YELLOW}⚠️ OpenShift: could not mirror runai-ca-cert to runai-backend (RBAC?); runai namespace secret is the minimum for the cluster release.${NC}" >&2
     else
         echo -e "${GREEN}✅ OpenShift: runai-ca-cert also applied in runai-backend (same CA as in-cluster clients that trust customCA).${NC}"
