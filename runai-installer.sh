@@ -111,6 +111,7 @@ show_usage() {
     echo "  --sanity [ARGS]        First option only: run only sanity-check/sanity-check.sh with ARGS; full log in logs/ (see logs/latest.log) like a full install"
     echo "  --dns DNS_NAME         global.domain (Run:ai FQDN). On OpenShift with --openshift, optional: defaults to runai.apps.<base> from the cluster if kubecontext can read dns/ingress"
     echo "  --runai-version VER    Run:ai version (use 'latest' to resolve from Helm; with --ngc, optional pin file ${RUNAI_INSTALLER_DIR}/runai_version)"
+    echo "  --version VER          Alias for --runai-version (useful with --automatic)"
     echo "  --cluster-only         Skip backend installation and only install Run.ai cluster"
     echo "  --internal-dns         Configure internal DNS (requires --ip)"
     echo "  --ip IP_ADDRESS        Required if --internal-dns, --patch-nginx, or --patch-haproxy is set"
@@ -419,6 +420,14 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --runai-version)
+            RUNAI_VERSION="$2"
+            shift 2
+            ;;
+        --version=*)
+            RUNAI_VERSION="${1#*=}"
+            shift
+            ;;
+        --version)
             RUNAI_VERSION="$2"
             shift 2
             ;;
