@@ -667,15 +667,108 @@ automatic_install_missing_optional_components() {
     return $?
 }
 
+automatic_release_progress_line() {
+    local ns="$1"
+    local preferred_release="$2"
+    local label="$3"
+    local release="$preferred_release"
+    local helm_state="not-installed"
+    local ready="0"
+    local total="0"
+    local pod_counts=""
+
+    if [ -z "$release" ] || ! helm status "$release" -n "$ns" >/dev/null 2>&1; then
+        release="$(helm list -n "$ns" --short 2>/dev/null | head -1 || true)"
+    fi
+    if [ -n "$release" ]; then
+        helm_state="$(helm status "$release" -n "$ns" -o json 2>/dev/null | jq -r '.info.status // "unknown"' 2>/dev/null || echo "unknown")"
+    fi
+
+    pod_counts="$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | awk '
+        BEGIN { r=0; t=0 }
+        {
+            split($2, a, "/");
+            if (a[1] ~ /^[0-9]+$/) r += a[1];
+            if (a[2] ~ /^[0-9]+$/) t += a[2];
+        }
+        END { printf "%d %d", r, t }
+    ')"
+    if [ -n "$pod_counts" ]; then
+        ready="$(printf '%s' "$pod_counts" | awk '{print $1}')"
+        total="$(printf '%s' "$pod_counts" | awk '{print $2}')"
+    fi
+    [ -n "$ready" ] || ready="0"
+    [ -n "$total" ] || total="0"
+
+    if [ "$helm_state" = "not-installed" ] && { [ -z "$total" ] || [ "$total" = "0" ]; }; then
+        echo "${label}: starting…"
+        return 0
+    fi
+
+    echo "${label}: ${ready}/${total} pods ready (helm: ${helm_state})"
+}
+
+automatic_monitor_control_plane_install() {
+    local child_pid="$1"
+    local backend_line=""
+    local cluster_line=""
+    local status_line=""
+
+    while kill -0 "$child_pid" >/dev/null 2>&1; do
+        backend_line="$(automatic_release_progress_line "runai-backend" "runai-backend" "Step 1: runai-backend")"
+        cluster_line="$(automatic_release_progress_line "runai" "runai" "Step 2: runai")"
+
+        if [ -n "$backend_line" ] && [ -n "$cluster_line" ]; then
+            status_line="  ${backend_line} | ${cluster_line}"
+        elif [ -n "$backend_line" ]; then
+            status_line="  ${backend_line}"
+        elif [ -n "$cluster_line" ]; then
+            status_line="  ${cluster_line}"
+        else
+            status_line="  Two-step install: runai-backend → runai (preparing)…"
+        fi
+        echo -ne "\r${status_line}    "
+
+        sleep 8
+    done
+    echo ""
+}
+
 automatic_run_sub_installer() {
+    local tmp rc
+    tmp="$(mktemp "${TMPDIR:-/tmp}/runai-subinstaller.XXXXXX")" || return 1
     # Run from repo root; clear automatic flags so nested runs are normal install-only.
-    ( cd "$REPO_ROOT" && AUTOMATIC_MODE=false AUTO_YES=false AUTOMATIC_CHAIN=false \
-        RUNAI_SUBINSTALLER=true \
-        RUNAI_ARTIFACT_SOURCE="${RUNAI_ARTIFACT_SOURCE:-jfrog}" \
-        NGC_API_KEY="${NGC_API_KEY:-}" \
-        RUNAI_K8S_DISTRIBUTION="${RUNAI_K8S_DISTRIBUTION:-}" \
-        NO_CERT="${NO_CERT:-false}" \
-        bash ./runai-installer.sh "$@" )
+    (
+        cd "$REPO_ROOT" && AUTOMATIC_MODE=false AUTO_YES=true AUTOMATIC_CHAIN=false \
+            RUNAI_SUBINSTALLER=true \
+            RUNAI_ARTIFACT_SOURCE="${RUNAI_ARTIFACT_SOURCE:-jfrog}" \
+            NGC_API_KEY="${NGC_API_KEY:-}" \
+            RUNAI_K8S_DISTRIBUTION="${RUNAI_K8S_DISTRIBUTION:-}" \
+            NO_CERT="${NO_CERT:-false}" \
+            bash ./runai-installer.sh "$@"
+    ) >"$tmp" 2>&1 &
+    local sub_pid=$!
+
+    if [ "${RUNAI_AUTO_MONITOR_CONTROL_PLANE:-false}" = true ]; then
+        automatic_monitor_control_plane_install "$sub_pid"
+    fi
+
+    wait "$sub_pid"
+    rc=$?
+
+    if [ -n "${LOG_FILE:-}" ] && [ -f "$tmp" ]; then
+        {
+            echo ""
+            echo "==== Sub-installer output: ./runai-installer.sh $* ===="
+            awk '{print}' "$tmp"
+        } >>"$LOG_FILE"
+    fi
+
+    if [ "$rc" -ne 0 ]; then
+        echo -e "${RED}❌ Sub-installer step failed.${NC} ${YELLOW}Details:${NC} ${LOG_FILE:-$tmp}" >&2
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+    return "$rc"
 }
 
 # Preflight infra summary (minimal output): storage class + internal storage capacity.
@@ -996,9 +1089,20 @@ automatic_run_preflight_sanity_checks() {
             return 0
         fi
         PREINSTALL_STORAGE_RAN=true
-        if ! AUTOMATIC_PREFLIGHT_SC_PROBE="$sc_osp" AUTOMATIC_PREFLIGHT_SUMMARY=true automatic_run_sanity_check --storage --class "$sc_osp"; then
-            return 1
+        local first_try_out=""
+        first_try_out="$(mktemp "${TMPDIR:-/tmp}/runai-storage-first.XXXXXX")" || return 1
+        if AUTOMATIC_PREFLIGHT_SC_PROBE="$sc_osp" AUTOMATIC_PREFLIGHT_SUMMARY=true automatic_run_sanity_check --storage --class "$sc_osp" >"$first_try_out" 2>&1; then
+            awk '{print}' "$first_try_out"
+        else
+            # Transient CSI/PVC races are common on busy clusters; retry once before failing preflight.
+            echo -e "${YELLOW}Checking StorageClass ->> Retrying (transient PVC probe issue)...${NC}"
+            sleep 5
+            if ! AUTOMATIC_PREFLIGHT_SC_PROBE="$sc_osp" AUTOMATIC_PREFLIGHT_SUMMARY=true automatic_run_sanity_check --storage --class "$sc_osp"; then
+                rm -f "$first_try_out" 2>/dev/null || true
+                return 1
+            fi
         fi
+        rm -f "$first_try_out" 2>/dev/null || true
         echo -e "\n${GREEN}✅ OpenShift preflight: NGC (as applicable) + storage check passed${NC}"
         return 0
     fi
@@ -1167,8 +1271,8 @@ run_automatic_mode() {
         if [ -n "${LOG_FILE:-}" ]; then
             echo "OpenShift automatic: skipping HAProxy install/probe (platform Routes)." >>"$LOG_FILE"
         fi
-        kubectl create namespace runai 2>/dev/null || true
-        kubectl create namespace runai-backend 2>/dev/null || true
+        kubectl create namespace runai >/dev/null 2>&1 || true
+        kubectl create namespace runai-backend >/dev/null 2>&1 || true
         runai_openshift_label_runai_namespace_psa
     else
         echo -e "\n${BLUE}▶ Ingress (HAProxy)${NC}"
@@ -1177,8 +1281,8 @@ run_automatic_mode() {
             return 1
         fi
 
-        kubectl create namespace runai 2>/dev/null || true
-        kubectl create namespace runai-backend 2>/dev/null || true
+        kubectl create namespace runai >/dev/null 2>&1 || true
+        kubectl create namespace runai-backend >/dev/null 2>&1 || true
 
         echo -e "\n${BLUE}▶ Checking Ingress and network connectivity${NC}"
         if ! automatic_repatch_haproxy_external_ip_for_network_check "$AUTO_IP"; then
@@ -1278,7 +1382,13 @@ run_automatic_mode() {
 
     if automatic_stop_maybe tls; then return 0; fi
 
-    echo -e "\n${BLUE}▶ StorageClass & storage test${NC}"
+    local storage_phase_silent=false
+    if [ "${PREINSTALL_STORAGE_RAN:-false}" = true ]; then
+        storage_phase_silent=true
+    fi
+    if [ "$storage_phase_silent" != true ]; then
+        echo -e "\n${BLUE}▶ StorageClass & storage test${NC}"
+    fi
     if [ -z "$(kubectl get storageclass -o jsonpath='{.items[*].metadata.name}' 2>/dev/null)" ]; then
         if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
             echo -e "${RED}❌ No StorageClass in this OpenShift cluster.${NC} Add a default ${BLUE}StorageClass${NC} (storage operator / admin) — this installer does not install local-path on OpenShift." >&2
@@ -1317,7 +1427,7 @@ run_automatic_mode() {
         done
         kubectl patch storageclass "$default_sc" -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
     else
-        echo -e "${GREEN}Default StorageClass: ${default_sc}${NC}"
+        [ "$storage_phase_silent" != true ] && echo -e "${GREEN}Default StorageClass: ${default_sc}${NC}"
     fi
 
     default_sc=$(kubectl get storageclass -o jsonpath='{range .items[?(@.metadata.annotations.storageclass\.kubernetes\.io/is-default-class=="true")]}{.metadata.name}{end}' 2>/dev/null)
@@ -1326,9 +1436,7 @@ run_automatic_mode() {
         return 1
     fi
 
-    if [ "${PREINSTALL_STORAGE_RAN:-false}" = true ]; then
-        echo -e "${GREEN}Storage preflight already ran — skipping duplicate storage sanity test.${NC}"
-    else
+    if [ "${PREINSTALL_STORAGE_RAN:-false}" != true ]; then
         if ! automatic_run_sanity_check --storage --class "$default_sc"; then
             echo -e "${RED}❌ Storage sanity check failed${NC}" >&2
             return 1
@@ -1338,8 +1446,30 @@ run_automatic_mode() {
     if automatic_stop_maybe storage; then return 0; fi
 
     if automatic_has_install_credentials; then
-        if ! automatic_resolve_runai_version_for_automatic; then
+        local version_resolve_out=""
+        version_resolve_out="$(mktemp "${TMPDIR:-/tmp}/runai-version-resolve.XXXXXX")" || return 1
+        if ! automatic_resolve_runai_version_for_automatic >"$version_resolve_out" 2>&1; then
+            if [ -n "${LOG_FILE:-}" ] && [ -f "$version_resolve_out" ]; then
+                {
+                    echo ""
+                    echo "==== Automatic version resolution output ===="
+                    awk '{print}' "$version_resolve_out"
+                } >>"$LOG_FILE"
+            fi
+            awk '{print}' "$version_resolve_out" >&2 || true
+            rm -f "$version_resolve_out" 2>/dev/null || true
             return 1
+        fi
+        if [ -n "${LOG_FILE:-}" ] && [ -f "$version_resolve_out" ]; then
+            {
+                echo ""
+                echo "==== Automatic version resolution output ===="
+                awk '{print}' "$version_resolve_out"
+            } >>"$LOG_FILE"
+        fi
+        rm -f "$version_resolve_out" 2>/dev/null || true
+        if [ -n "${RUNAI_VERSION:-}" ]; then
+            echo -e "Using Run:ai version: ${RUNAI_VERSION}"
         fi
     fi
 
@@ -1408,7 +1538,8 @@ run_automatic_mode() {
     fi
 
     if automatic_has_install_credentials; then
-        echo -e "\n${BLUE}▶ Full Run.ai install${NC}"
+        echo -e "\n${BLUE}▶ Installing Run:ai control plane${NC}"
+        echo -e "  ${BLUE}Two-step install:${NC} ${GREEN}(1) runai-backend${NC} → ${GREEN}(2) runai${NC}. One line below shows ${GREEN}ready/total${NC} pods for each step."
         local -a chain
         if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
             # OpenShift: control plane uses global.config.kubernetesDistribution=openshift; no HAProxy; no installer certs by default
@@ -1433,12 +1564,16 @@ run_automatic_mode() {
         if [ -n "${LOG_FILE:-}" ]; then
             echo "Running: ./runai-installer.sh ${chain[*]}" >>"$LOG_FILE"
         fi
-        echo -e "${YELLOW}Replay:${NC} same command is saved in ${BLUE}logs/automatic-last.env${NC} (comment at bottom)."
-        if ! automatic_run_sub_installer "${chain[@]}"; then
+        echo -e "${YELLOW}Replay:${NC} same command is saved in ${BLUE}logs/automatic-last.env${NC}."
+        if ! RUNAI_AUTO_MONITOR_CONTROL_PLANE=true automatic_run_sub_installer "${chain[@]}"; then
             echo -e "${RED}❌ Full Run.ai install failed${NC}" >&2
             return 1
         fi
-        echo -e "\n${GREEN}✅ Automatic mode + full Run.ai install completed.${NC}"
+        echo -e "\n${GREEN}✅ Run.ai installation completed successfully${NC}"
+        echo -e "  Access URL: https://${AUTO_DNS}"
+        if [ "${CLUSTER_ONLY:-false}" != true ]; then
+            echo -e "  Credentials: test@run.ai / Abcd!234"
+        fi
     else
         echo -e "\n${YELLOW}Next (manual full install):${NC}"
         if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
