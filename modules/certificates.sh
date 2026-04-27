@@ -1,5 +1,49 @@
 #!/bin/bash
 
+# Build SAN list and generate certs via the dedicated script in repo root.
+generate_with_create_cert_script() {
+    local cert_dir="$1"
+    local cert_tool="./create-cert.sh"
+    local dns_csv=""
+
+    if [ -z "${DNS_NAME:-}" ]; then
+        echo -e "${RED}❌ DNS_NAME is empty; cannot generate certificates${NC}" >&2
+        return 1
+    fi
+
+    if [ ! -x "$cert_tool" ]; then
+        # Fallback when executable bit is missing.
+        if [ ! -f "$cert_tool" ]; then
+            echo -e "${RED}❌ Missing $cert_tool${NC}" >&2
+            return 1
+        fi
+    fi
+
+    # Keep existing SAN behavior from this module.
+    dns_csv="${DNS_NAME},*.runai.${DNS_NAME},*.${DNS_NAME}"
+    echo -e "${BLUE}Generating certificates via create-cert.sh...${NC}"
+    if ! log_command "bash \"$cert_tool\" --dns \"$dns_csv\" --out-dir \"$cert_dir\"" "Generate certificates with create-cert.sh"; then
+        echo -e "${RED}❌ create-cert.sh failed (check log for openssl output)${NC}" >&2
+        return 1
+    fi
+
+    if [ ! -f "$cert_dir/runai.crt" ] || [ ! -f "$cert_dir/runai.key" ] || [ ! -f "$cert_dir/full-chain.pem" ]; then
+        echo -e "${RED}❌ create-cert.sh completed but expected files are missing in $cert_dir${NC}" >&2
+        return 1
+    fi
+
+    return 0
+}
+
+backup_generated_certs() {
+    local cert_dir="$1"
+    local backup_dir="$2"
+    mkdir -p "$backup_dir"
+    cp "$cert_dir/runai.crt" "$backup_dir/"
+    cp "$cert_dir/runai.key" "$backup_dir/"
+    cp "$cert_dir/full-chain.pem" "$backup_dir/"
+}
+
 # Function to setup certificates
 setup_certificates() {
     # If --no-cert is set, skip certificate setup
@@ -46,73 +90,14 @@ setup_certificates() {
 
         echo -e "${GREEN}✅ Using provided certificates and backed up to $CERTS_BACKUP_DIR${NC}"
     else
-        # Generate self-signed certificates
+        # Generate self-signed certificates using the shared script.
         echo -e "${BLUE}Creating certificates in: $CERT_DIR${NC}"
         mkdir -p "$CERT_DIR"
-        cd "$CERT_DIR"
-
-        # Set the password environment variable
-        export OPENSSL_PASSWORD='kirson'
-
-        echo -e "${BLUE}Generating certificates...${NC}"
-        # Generate the root key with the provided passphrase
-        if ! log_command "openssl genrsa -des3 -passout env:OPENSSL_PASSWORD -out rootCA.key 2048" "Generate root CA private key"; then
-            echo -e "${RED}❌ Failed to generate root key${NC}"
+        if ! generate_with_create_cert_script "$CERT_DIR"; then
             exit 1
         fi
 
-        # Generate root certificate
-        if ! log_command "openssl req -x509 -new -nodes -key rootCA.key -passin env:OPENSSL_PASSWORD -sha256 -days 730 -out rootCA.pem -subj '/C=US/ST=IL/L=USA/O=Jupyter/CN=self-signed-nvidia'" "Generate root CA certificate"; then
-            echo -e "${RED}❌ Failed to generate root certificate${NC}"
-            exit 1
-        fi
-
-        # Generate a private key for your service
-        if ! log_command "openssl genrsa -out runai.key 2048" "Generate service private key"; then
-            echo -e "${RED}❌ Failed to generate service key${NC}"
-            exit 1
-        fi
-
-        # Generate a CSR for your service
-        if ! log_command "openssl req -new -key runai.key -out runai.csr -subj '/C=US/ST=IL/L=USA/O=RUNAI/CN=$DNS_NAME'" "Generate certificate signing request"; then
-            echo -e "${RED}❌ Failed to generate CSR${NC}"
-            exit 1
-        fi
-
-        # Create the configuration file for the extensions
-        cat << EOF > openssl.cnf
-basicConstraints = CA:FALSE
-authorityKeyIdentifier = keyid,issuer
-keyUsage = digitalSignature, keyEncipherment
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = $DNS_NAME
-DNS.2 = *.runai.$DNS_NAME
-DNS.3 = *.$DNS_NAME
-EOF
-
-        # Create the certificate
-        if ! log_command "openssl x509 -req -in runai.csr -CA rootCA.pem -CAkey rootCA.key -passin env:OPENSSL_PASSWORD -CAcreateserial -out runai.crt -days 730 -sha256 -extfile openssl.cnf" "Create service certificate"; then
-            echo -e "${RED}❌ Failed to create certificate${NC}"
-            exit 1
-        fi
-
-        # Combine the certificates into a chain
-        log_command "cat runai.crt rootCA.pem > full-chain.pem" "Create certificate chain"
-
-        # Verify the certificate
-        if ! log_command "openssl verify -CAfile rootCA.pem runai.crt" "Verify certificate"; then
-            echo -e "${YELLOW}⚠️ Warning: Certificate verification failed, but continuing...${NC}"
-        else
-            echo -e "${GREEN}✅ Certificate verified successfully${NC}"
-        fi
-
-        # After successful generation, copy to backup directory
-        mkdir -p "$CERTS_BACKUP_DIR"
-        cp runai.crt "$CERTS_BACKUP_DIR/"
-        cp runai.key "$CERTS_BACKUP_DIR/"
-        cp full-chain.pem "$CERTS_BACKUP_DIR/"
+        backup_generated_certs "$CERT_DIR" "$CERTS_BACKUP_DIR"
 
         # Set certificate paths
         export CERT="$CERT_DIR/runai.crt"
@@ -194,73 +179,14 @@ generate_certificates_only() {
 
         echo -e "${GREEN}✅ Using provided certificates and backed up to $CERTS_BACKUP_DIR${NC}"
     else
-        # Generate self-signed certificates
+        # Generate self-signed certificates using the shared script.
         echo -e "${BLUE}Creating certificates in: $CERT_DIR${NC}"
         mkdir -p "$CERT_DIR"
-        cd "$CERT_DIR"
-
-        # Set the password environment variable
-        export OPENSSL_PASSWORD='kirson'
-
-        echo -e "${BLUE}Generating certificates...${NC}"
-        # Generate the root key with the provided passphrase
-        if ! log_command "openssl genrsa -des3 -passout env:OPENSSL_PASSWORD -out rootCA.key 2048" "Generate root CA private key"; then
-            echo -e "${RED}❌ Failed to generate root key${NC}"
+        if ! generate_with_create_cert_script "$CERT_DIR"; then
             exit 1
         fi
 
-        # Generate root certificate
-        if ! log_command "openssl req -x509 -new -nodes -key rootCA.key -passin env:OPENSSL_PASSWORD -sha256 -days 730 -out rootCA.pem -subj '/C=US/ST=IL/L=USA/O=Jupyter/CN=self-signed-nvidia'" "Generate root CA certificate"; then
-            echo -e "${RED}❌ Failed to generate root certificate${NC}"
-            exit 1
-        fi
-
-        # Generate a private key for your service
-        if ! log_command "openssl genrsa -out runai.key 2048" "Generate service private key"; then
-            echo -e "${RED}❌ Failed to generate service key${NC}"
-            exit 1
-        fi
-
-        # Generate a CSR for your service
-        if ! log_command "openssl req -new -key runai.key -out runai.csr -subj '/C=US/ST=IL/L=USA/O=RUNAI/CN=$DNS_NAME'" "Generate certificate signing request"; then
-            echo -e "${RED}❌ Failed to generate CSR${NC}"
-            exit 1
-        fi
-
-        # Create the configuration file for the extensions
-        cat << EOF > openssl.cnf
-basicConstraints = CA:FALSE
-authorityKeyIdentifier = keyid,issuer
-keyUsage = digitalSignature, keyEncipherment
-subjectAltName = @alt_names
-
-[alt_names]
-DNS.1 = $DNS_NAME
-DNS.2 = *.runai.$DNS_NAME
-DNS.3 = *.$DNS_NAME
-EOF
-
-        # Create the certificate
-        if ! log_command "openssl x509 -req -in runai.csr -CA rootCA.pem -CAkey rootCA.key -passin env:OPENSSL_PASSWORD -CAcreateserial -out runai.crt -days 730 -sha256 -extfile openssl.cnf" "Create service certificate"; then
-            echo -e "${RED}❌ Failed to create certificate${NC}"
-            exit 1
-        fi
-
-        # Combine the certificates into a chain
-        log_command "cat runai.crt rootCA.pem > full-chain.pem" "Create certificate chain"
-
-        # Verify the certificate
-        if ! log_command "openssl verify -CAfile rootCA.pem runai.crt" "Verify certificate"; then
-            echo -e "${YELLOW}⚠️ Warning: Certificate verification failed, but continuing...${NC}"
-        else
-            echo -e "${GREEN}✅ Certificate verified successfully${NC}"
-        fi
-
-        # After successful generation, copy to backup directory
-        mkdir -p "$CERTS_BACKUP_DIR"
-        cp runai.crt "$CERTS_BACKUP_DIR/"
-        cp runai.key "$CERTS_BACKUP_DIR/"
-        cp full-chain.pem "$CERTS_BACKUP_DIR/"
+        backup_generated_certs "$CERT_DIR" "$CERTS_BACKUP_DIR"
 
         # Set certificate paths
         export CERT="$CERT_DIR/runai.crt"

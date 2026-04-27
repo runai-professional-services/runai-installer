@@ -1,4 +1,95 @@
 #!/bin/bash
+# shellcheck source=runai-wait-helpers.sh
+# When this file is sourced from a mktemp copy in runai-installer.sh, BASH_SOURCE[0] is /tmp/...; resolve helpers from the real modules dir.
+_runai_wait_helpers_src="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/runai-wait-helpers.sh"
+if [ ! -f "$_runai_wait_helpers_src" ] && [ -n "${RUNAI_INSTALLER_DIR:-}" ] && [ -f "$RUNAI_INSTALLER_DIR/modules/runai-wait-helpers.sh" ]; then
+    _runai_wait_helpers_src="$RUNAI_INSTALLER_DIR/modules/runai-wait-helpers.sh"
+fi
+if [ ! -f "$_runai_wait_helpers_src" ]; then
+    echo "❌ runai-wait-helpers.sh not found (expected next to runai.sh or \${RUNAI_INSTALLER_DIR}/modules/)." >&2
+    return 1 2>/dev/null || exit 1
+fi
+# shellcheck source=/dev/null
+. "$_runai_wait_helpers_src"
+unset _runai_wait_helpers_src
+
+# OpenShift: when using --no-cert, the runai cluster Helm pre-install still HTTPS GETs
+# controlPlaneUrl/_version and must trust TLS for the *Route* hostname (default `*.apps` router).
+# We create runai-ca-cert (same PEM in runai and runai-backend) and keep global.customCA.enabled on the cluster install.
+# Run:ai mounts / uses that secret for in-cluster clients (e.g. HTTPS to the same FQDN) — the label
+# run.ai/cluster-wide=true (applied later) is the product’s “use this CA for the stack”, not OpenShift’s
+# cluster-wide /etc/pki. For the whole cluster, admins still configure Cluster Proxy spec.trustedCA
+# (user-ca-bundle) separately if they need that.
+#
+# PEM source: (1) --openshift-ingress-cacert FILE, or (2) automatic: openshift-ingress/router-ca
+# (router CA for `*.apps` *Routes*), or TLS probe to global.domain. Set RUNAI_OCP_NO_AUTO_INGRESS_CA=1 to skip
+# and leave customCA out (old behavior; pre-install may fail on private CAs).
+runai_inject_openshift_ingress_cacert_for_cluster_if_needed() {
+    # Vanilla / non-OCP: no-op. All router-ca / runai-ca / auto-fetch logic only runs when
+    # RUNAI_K8S_DISTRIBUTION=openshift (from --openshift). Does not change plain Kubernetes installs.
+    RUNAI_INJECTED_OCP_CLUSTER_CA=0
+    if [ "${RUNAI_K8S_DISTRIBUTION:-}" != "openshift" ] || [ "${NO_CERT:-false}" != true ]; then
+        return 0
+    fi
+
+    local cacert="${RUNAI_OCP_INGRESS_CACERT_FILE:-}" auto_tmp=""
+    local osh
+    osh="${RUNAI_INSTALLER_DIR:+$RUNAI_INSTALLER_DIR/}modules/openshift.sh"
+    [ -f "$osh" ] || osh="./modules/openshift.sh"
+    if [ -n "$cacert" ]; then
+        if [ ! -f "$cacert" ]; then
+            echo -e "${RED}❌ --openshift-ingress-cacert: not a file: $cacert${NC}" >&2
+            return 1
+        fi
+    elif [ "${RUNAI_OCP_NO_AUTO_INGRESS_CA:-false}" = true ] || [ "${RUNAI_OCP_NO_AUTO_INGRESS_CA:-0}" = 1 ]; then
+        echo -e "${YELLOW}⚠️ OpenShift: RUNAI_OCP_NO_AUTO_INGRESS_CA set; skipping router/Route trust PEM and global.customCA for runai (cluster pre-install may fail on unknown CA).${NC}" >&2
+        return 0
+    else
+        if [ ! -f "$osh" ]; then
+            echo -e "${RED}❌ Missing $osh (cannot auto-fetch OpenShift default router CA for apps subdomains / Routes)${NC}" >&2
+            return 1
+        fi
+        # shellcheck source=modules/openshift.sh
+        . "$osh" || { echo -e "${RED}❌ Failed to source $osh${NC}" >&2; return 1; }
+        auto_tmp=$(mktemp) || { echo -e "${RED}❌ mktemp failed${NC}" >&2; return 1; }
+        if ! runai_openshift_auto_fetch_ingress_cacert_to "$auto_tmp" "${control_plane_domain:-$DNS_NAME}"; then
+            rm -f "$auto_tmp" 2>/dev/null
+            echo -e "${RED}❌ OpenShift: could not obtain trust material for the Route/HTTPS host ${control_plane_domain:-$DNS_NAME} (configmap router-ca, or TLS probe to that name).${NC}" >&2
+            runai_openshift_print_ingress_cacert_hint "${control_plane_domain:-$DNS_NAME}" 2>&1
+            echo -e "${YELLOW}  → Pass --openshift-ingress-cacert, or set RUNAI_OCP_NO_AUTO_INGRESS_CA=1 to skip (not recommended).${NC}" >&2
+            return 1
+        fi
+        cacert="$auto_tmp"
+        echo -e "${GREEN}✅ OpenShift: using auto-fetched ingress trust material for runai cluster (global.customCA)${NC}"
+    fi
+
+    if [ -z "$cacert" ] || [ ! -f "$cacert" ]; then
+        return 0
+    fi
+    echo -e "${BLUE}OpenShift: applying default router / Route trust PEM to runai (secret runai-ca-cert) for cluster Helm customCA…${NC}"
+    kubectl create namespace runai 2>/dev/null || true
+    if ! kubectl create secret generic runai-ca-cert -n runai \
+        --from-file=runai-ca.pem="$cacert" --dry-run=client -o yaml | kubectl apply -f -; then
+        if [ -n "$auto_tmp" ] && [ "$auto_tmp" = "$cacert" ]; then
+            rm -f "$auto_tmp" 2>/dev/null
+        fi
+        echo -e "${RED}❌ Could not create secret runai-ca-cert in runai (check RBAC)${NC}" >&2
+        return 1
+    fi
+    # Same trust bundle as create_certificates: backend may read it; must apply before we rm auto_tmp.
+    kubectl create namespace runai-backend 2>/dev/null || true
+    if ! kubectl create secret generic runai-ca-cert -n runai-backend \
+        --from-file=runai-ca.pem="$cacert" --dry-run=client -o yaml | kubectl apply -f -; then
+        echo -e "${YELLOW}⚠️ OpenShift: could not mirror runai-ca-cert to runai-backend (RBAC?); runai namespace secret is the minimum for the cluster release.${NC}" >&2
+    else
+        echo -e "${GREEN}✅ OpenShift: runai-ca-cert also applied in runai-backend (same CA as in-cluster clients that trust customCA).${NC}"
+    fi
+    if [ -n "$auto_tmp" ] && [ "$auto_tmp" = "$cacert" ]; then
+        rm -f "$auto_tmp" 2>/dev/null
+    fi
+    RUNAI_INJECTED_OCP_CLUSTER_CA=1
+    return 0
+}
 
 # Function to create namespaces
 create_namespaces() {
@@ -201,10 +292,16 @@ install_runai() {
         if [ "$NO_CERT" != true ]; then
             HELM_OPTS="$HELM_OPTS --set global.customCA.enabled=true"
         fi
-        if [ -n "${RUNAI_INGRESS_CLASS:-}" ]; then
-            HELM_OPTS="$HELM_OPTS --set global.ingress.ingressClass=$RUNAI_INGRESS_CLASS"
-        elif [ "${INSTALL_HAPROXY:-false}" = true ]; then
-            HELM_OPTS="$HELM_OPTS --set global.ingress.ingressClass=haproxy"
+        if [ "${RUNAI_K8S_DISTRIBUTION:-}" = "openshift" ]; then
+            HELM_OPTS="$HELM_OPTS --set global.config.kubernetesDistribution=openshift"
+        fi
+        # OpenShift: platform Routes only — do not set global.ingress.ingressClass (spurious env must not add haproxy/nginx).
+        if [ "${RUNAI_K8S_DISTRIBUTION:-}" != "openshift" ]; then
+            if [ -n "${RUNAI_INGRESS_CLASS:-}" ]; then
+                HELM_OPTS="$HELM_OPTS --set global.ingress.ingressClass=$RUNAI_INGRESS_CLASS"
+            elif [ "${INSTALL_HAPROXY:-false}" = true ]; then
+                HELM_OPTS="$HELM_OPTS --set global.ingress.ingressClass=haproxy"
+            fi
         fi
 
         if ! log_command "helm upgrade --install runai-backend -n runai-backend $CP_CHART --version \"$RUNAI_VERSION\" $HELM_OPTS > /dev/null 2>&1" "Install Run.ai backend"; then
@@ -214,19 +311,17 @@ install_runai() {
             echo -e "${GREEN}✅ Run.ai backend installation started${NC}"
         fi
 
-        # Wait for pods to be ready
+        # Wait for pods to be ready (recompute each tick: pod count can grow during rollout)
         echo -e "${BLUE}Waiting for Run.ai backend pods to be ready...${NC}"
         while true; do
-            TOTAL_PODS=$(kubectl get pods -n runai-backend --no-headers | wc -l)
-            RUNNING_PODS=$(kubectl get pods -n runai-backend --no-headers | grep "Running" | wc -l)
-            NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
+            read -r TOTAL_PODS READY_PODS < <(runai_pod_readiness_counts runai-backend)
+            HSTAT=$(runai_helm_info_status runai-backend runai-backend)
+            NOT_READY=$((TOTAL_PODS - READY_PODS))
 
-            # Use carriage return to update the same line
-            echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
+            echo -ne "⏳ Waiting... ($READY_PODS ready of $TOTAL_PODS, Helm runai-backend: $HSTAT)    \r"
 
-            if [ "$NOT_READY" -eq 0 ]; then
-                # Print a newline and completion message when done
-                echo -e "\n${GREEN}✅ All Run.ai backend pods are now running!${NC}"
+            if [ "$NOT_READY" -eq 0 ] && [ "$TOTAL_PODS" -gt 0 ] && runai_helm_release_is_deployed runai-backend runai-backend; then
+                echo -e "\n${GREEN}✅ Run.ai backend pods are ready and Helm is deployed (runai-backend)${NC}"
                 break
             fi
             sleep 5
@@ -364,8 +459,16 @@ install_runai() {
     echo -e "${BLUE}Creating installation script...${NC}"
     installation_str=$(jq -r '.installationStr' input.json)
 
-    # If NO_CERT is true, remove the global.customCA.enabled=true parameter
-    if [ "$NO_CERT" = true ]; then
+    if ! runai_inject_openshift_ingress_cacert_for_cluster_if_needed; then
+        echo -e "${RED}❌ OpenShift apps-route CA injection failed${NC}" >&2
+        exit 1
+    fi
+    if [ "$NO_CERT" = true ] && [ "${RUNAI_INJECTED_OCP_CLUSTER_CA:-0}" -eq 1 ]; then
+        echo -e "${GREEN}✅ runai namespace has runai-ca-cert; cluster Helm will use customCA for HTTPS to ${control_plane_domain:-$DNS_NAME}${NC}"
+    fi
+
+    # If NO_CERT is true, remove global.customCA — unless we injected the OpenShift route CA
+    if [ "$NO_CERT" = true ] && [ "${RUNAI_INJECTED_OCP_CLUSTER_CA:-0}" -ne 1 ]; then
         formatted_command=$(echo "$installation_str" | sed -E '
             s/\\ --set /\n--set /g;
             s/--set cluster.url=/--set cluster.url=/g;
@@ -405,29 +508,18 @@ install_runai() {
         echo -e "${YELLOW}⚠️ Warning: Failed to label Run.ai CA certificate secret, continuing...${NC}"
     fi
 
-    # Wait for all pods in runai namespace to be ready
-    # First, wait for the total pod count to stabilize
-    while true; do
-        TOTAL_PODS=$(kubectl get pods -n runai --no-headers | wc -l)
-        sleep 2
-        NEW_TOTAL=$(kubectl get pods -n runai --no-headers | wc -l)
-        if [ "$TOTAL_PODS" -eq "$NEW_TOTAL" ]; then
-            break
-        fi
-    done
-
-    # Now show progress with stable total count
+    # Wait for all pods in runai namespace to be ready (recompute each tick; total can
+    # increase while Helm rolls out, which previously made "Running > total" and hung)
     echo -e "${BLUE}Waiting for Run.ai cluster pods to be ready...${NC}"
     while true; do
-        RUNNING_PODS=$(kubectl get pods -n runai --no-headers | grep "Running" | wc -l)
-        NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
+        read -r TOTAL_PODS READY_PODS < <(runai_pod_readiness_counts runai)
+        HSTAT=$(runai_helm_info_status runai runai)
+        NOT_READY=$((TOTAL_PODS - READY_PODS))
 
-        # Use carriage return to update the same line
-        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
+        echo -ne "⏳ Waiting... ($READY_PODS ready of $TOTAL_PODS, Helm runai: $HSTAT)    \r"
 
-        if [ "$NOT_READY" -eq 0 ]; then
-            # Print a newline and completion message when done
-            echo -e "\n${GREEN}✅ All Run.ai cluster pods are ready${NC}"
+        if [ "$NOT_READY" -eq 0 ] && [ "$TOTAL_PODS" -gt 0 ] && runai_helm_release_is_deployed runai runai; then
+            echo -e "\n${GREEN}✅ Run.ai cluster pods are ready and Helm is deployed (runai)${NC}"
             break
         fi
         sleep 5

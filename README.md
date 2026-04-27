@@ -11,6 +11,7 @@
 - [Quick Start](#-quick-start)
 - [Configuration Options](#-configuration-options)
 - [Examples](#-examples)
+- [Automatic Mode (HAProxy Default)](#-automatic-mode-haproxy-default)
 - [What It Does](#-what-it-does)
 - [Default Access](#-default-access)
 - [Kubernetes Installation](#-kubernetes-installation)
@@ -166,6 +167,31 @@ This simplifies what would otherwise be a complex, multi-step installation proce
 # Install nginx, knative, lws, and storage class only
 ./runai-installer.sh --install-only --nginx --knative --lws --install-sc
 ```
+
+## 🤖 Automatic Mode (HAProxy Default)
+
+When using `--automatic`, you must provide an **NGC API key** (`--ngc-key` or `NGC_API_KEY`) so the installer can authenticate to Helm and create the **nvcr.io** pull secret (`runai-reg-creds`). Chart and image sources use **NGC** (`--ngc-key` implies `--ngc`).
+
+The installer uses **HAProxy** as the default ingress path for Run:ai and passes `--use-haproxy` for the chained installation flow.
+
+It also patches the HAProxy service `externalIPs` to the selected worker node IP (`<worker_ip>.sslip.io`), then verifies the service includes that IP.
+
+**Run automatic mode:**
+```sh
+./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY"
+```
+
+**Validate while testing:**
+```sh
+# show externalIPs on the expected HAProxy service
+kubectl get svc -n haproxy-controller haproxy-kubernetes-ingress -o jsonpath='{.spec.externalIPs}'
+echo
+
+# see worker/external IP mapping used by automatic flow
+kubectl get nodes -o wide
+```
+
+Expected result: HAProxy service `externalIPs` contains the worker node IP selected by automatic mode.
 
 **Air-gapped installation:**
 ```sh

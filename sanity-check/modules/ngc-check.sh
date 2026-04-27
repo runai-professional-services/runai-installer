@@ -72,3 +72,36 @@ run_ngc_key_check() {
     echo -e "${YELLOW}Helm: 400 often means wrong \$oauthtoken quoting; 401/403 = bad key or missing Run:ai Helm entitlement.${NC}" >&2
     return 1
 }
+
+# Minimal output for --automatic (same checks; key never logged).
+run_ngc_key_check_compact() {
+    NGC_API_KEY="$(ngc_check_normalize_key)"
+    if [ -z "$NGC_API_KEY" ]; then
+        echo -e "${RED}NGC API key — missing or empty${NC}" >&2
+        return 1
+    fi
+    export NGC_API_KEY
+
+    local helm_code
+    helm_code="$(ngc_check_http_status "https://helm.ngc.nvidia.com/nvidia/runai/index.yaml")"
+    if [ -n "${LOG_FILE:-}" ]; then
+        {
+            echo ""
+            echo "==== NGC key check (compact) ===="
+            echo "Helm runai index.yaml HTTP: $helm_code"
+            echo "Executing at: $(date)"
+        } >>"$LOG_FILE"
+    fi
+
+    if [ "$helm_code" = "200" ]; then
+        if [ "${NGC_KEY_CHECK_QUIET_OK:-false}" = true ] || [ "${NGC_KEY_CHECK_QUIET_OK:-}" = 1 ]; then
+            return 0
+        fi
+        echo -e "${GREEN}  OK${NC} — NGC key works for Run:ai Helm index ${BLUE}(HTTP 200)${NC}"
+        return 0
+    fi
+
+    echo -e "${RED}  Failed${NC} — Helm index returned HTTP ${helm_code} ${YELLOW}(need 200)${NC}" >&2
+    echo -e "${YELLOW}    Common: 401/403 = invalid key or missing Run:ai entitlement; 400 = key format/quoting.${NC}" >&2
+    return 1
+}

@@ -16,7 +16,17 @@ install_prometheus() {
         return 1
     fi
 
-    if ! log_command "helm install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace --set grafana.enabled=false > /dev/null 2>&1" "Install Prometheus Stack"; then
+    # If Prometheus Operator CRDs are already in the cluster (leftover, another stack, or failed
+    # partial install), Helm 3/4 server-side apply on CRDs can fail with:
+    #   conflicts with "helm" on .metadata.annotations / .spec.versions
+    # In that case install the release only; existing CRDs are used as-is.
+    local prom_install_cmd="helm upgrade --install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace --set grafana.enabled=false"
+    if kubectl get crd -o name 2>/dev/null | grep -q 'monitoring\.coreos\.com'; then
+        echo -e "${BLUE}Prometheus Operator CRDs already present — using ${YELLOW}--skip-crds${BLUE} to avoid CRD apply conflicts.${NC}"
+        prom_install_cmd="$prom_install_cmd --skip-crds"
+    fi
+
+    if ! log_command "$prom_install_cmd > /dev/null 2>&1" "Install Prometheus Stack"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to install prometheus stack, continuing...${NC}"
         return 1
     else

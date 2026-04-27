@@ -69,6 +69,12 @@ check_hardware_requirements() {
                     [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
                     SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.23"
                 fi
+
+                # v2.24 (latest) supports 1.33-1.35
+                if [[ "$K8S_MAJOR_MINOR" =~ ^1\.(3[3-5])$ ]]; then
+                    [ -n "$SUPPORTED_VERSIONS" ] && SUPPORTED_VERSIONS="$SUPPORTED_VERSIONS,"
+                    SUPPORTED_VERSIONS="${SUPPORTED_VERSIONS}2.24"
+                fi
             fi
             
             if [ -n "$SUPPORTED_VERSIONS" ]; then

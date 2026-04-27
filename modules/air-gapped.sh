@@ -1,4 +1,6 @@
 #!/bin/bash
+# shellcheck source=runai-wait-helpers.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/runai-wait-helpers.sh"
 
 # Function to handle air-gapped installation
 handle_air_gapped() {
@@ -319,7 +321,7 @@ EOF
         local cp_ingress_opts=""
         if [ -n "${RUNAI_INGRESS_CLASS:-}" ]; then
             cp_ingress_opts="--set global.ingress.ingressClass=$RUNAI_INGRESS_CLASS"
-        elif [ "${INSTALL_HAPROXY:-false}" = true ]; then
+        elif [ "${INSTALL_HAPROXY:-false}" = true ] && [ "${RUNAI_K8S_DISTRIBUTION:-}" != "openshift" ]; then
             cp_ingress_opts="--set global.ingress.ingressClass=haproxy"
         fi
         if ! log_command "helm upgrade -i runai-backend charts/control-plane.tgz --set global.domain=\"$DOMAIN\" --set global.customCA.enabled=true $cp_ingress_opts -n runai-backend -f custom-env.yaml" "Install Run.ai backend"; then
@@ -335,14 +337,14 @@ EOF
     # Wait for backend pods to be ready
     echo -e "${BLUE}Waiting for Run.ai backend pods to be ready...${NC}"
     while true; do
-        TOTAL_PODS=$(kubectl get pods -n runai-backend --no-headers | wc -l)
-        RUNNING_PODS=$(kubectl get pods -n runai-backend --no-headers | grep "Running" | wc -l)
-        NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
+        read -r TOTAL_PODS READY_PODS < <(runai_pod_readiness_counts runai-backend)
+        HSTAT=$(runai_helm_info_status runai-backend runai-backend)
+        NOT_READY=$((TOTAL_PODS - READY_PODS))
 
-        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
+        echo -ne "⏳ Waiting... ($READY_PODS ready of $TOTAL_PODS, Helm runai-backend: $HSTAT)    \r"
 
-        if [ "$NOT_READY" -eq 0 ]; then
-            echo -e "\n${GREEN}✅ All Run.ai backend pods are now running!${NC}"
+        if [ "$NOT_READY" -eq 0 ] && [ "$TOTAL_PODS" -gt 0 ] && runai_helm_release_is_deployed runai-backend runai-backend; then
+            echo -e "\n${GREEN}✅ Run.ai backend pods are ready and Helm is deployed (runai-backend)${NC}"
             break
         fi
         sleep 5
@@ -533,16 +535,14 @@ EOF
     # Wait for cluster pods to be ready
     echo -e "${BLUE}Waiting for Run.ai cluster pods to be ready...${NC}"
     while true; do
-        TOTAL_PODS=$(kubectl get pods -n runai --no-headers | wc -l)
-        RUNNING_PODS=$(kubectl get pods -n runai --no-headers | grep "Running" | wc -l)
-        NOT_READY=$((TOTAL_PODS - RUNNING_PODS))
+        read -r TOTAL_PODS READY_PODS < <(runai_pod_readiness_counts runai)
+        HSTAT=$(runai_helm_info_status runai runai)
+        NOT_READY=$((TOTAL_PODS - READY_PODS))
 
-        # Use carriage return to update the same line
-        echo -ne "⏳ Waiting... ($RUNNING_PODS pods Running out of $TOTAL_PODS)    \r"
+        echo -ne "⏳ Waiting... ($READY_PODS ready of $TOTAL_PODS, Helm runai: $HSTAT)    \r"
 
-        if [ "$NOT_READY" -eq 0 ]; then
-            # Print a newline and completion message when done
-            echo -e "\n${GREEN}✅ All Run.ai cluster pods are ready${NC}"
+        if [ "$NOT_READY" -eq 0 ] && [ "$TOTAL_PODS" -gt 0 ] && runai_helm_release_is_deployed runai runai; then
+            echo -e "\n${GREEN}✅ Run.ai cluster pods are ready and Helm is deployed (runai)${NC}"
             break
         fi
         sleep 5

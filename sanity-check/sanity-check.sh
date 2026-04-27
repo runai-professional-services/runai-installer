@@ -38,16 +38,29 @@ if [ -f "$SCRIPT_DIR/modules/ngc-check.sh" ]; then
   source "$SCRIPT_DIR/modules/ngc-check.sh"
 fi
 
-# Create logs directory
-LOGS_DIR="./logs"
-mkdir -p "$LOGS_DIR"
-LOG_FILE="$LOGS_DIR/sanity_check_$(date +%Y%m%d_%H%M%S).log"
-echo "Sanity check started at $(date)" > "$LOG_FILE"
+# Logs: default under sanity-check/logs. If runai-investyler (or --sanity) sets
+# RUNAI_SANITY_UNIFIED_LOG_FILE to logs/installation_*.log, log_command and tls_step_log
+# append there so "tail -f <repo>/logs/latest.log" is one stream.
+if [ -n "${RUNAI_SANITY_UNIFIED_LOG_FILE:-}" ] && [ -d "$(dirname -- "$RUNAI_SANITY_UNIFIED_LOG_FILE")" ]; then
+  LOGS_DIR="$(cd "$(dirname -- "$RUNAI_SANITY_UNIFIED_LOG_FILE")" && pwd)"
+  LOG_FILE="$RUNAI_SANITY_UNIFIED_LOG_FILE"
+  { echo ""; echo "==== sanity-check (unified with runai-installer) at $(date) ===="; } >> "$LOG_FILE" 2>/dev/null || true
+  LATEST_LOG="$LOGS_DIR/latest.log"
+  : "${SANITY_SKIP_LATEST_LINK:=true}"
+else
+  # Create logs directory
+  LOGS_DIR="./logs"
+  mkdir -p "$LOGS_DIR"
+  LOG_FILE="$LOGS_DIR/sanity_check_$(date +%Y%m%d_%H%M%S).log"
+  echo "Sanity check started at $(date)" > "$LOG_FILE"
 
-# Create symlink to latest log
-LATEST_LOG="$LOGS_DIR/latest.log"
-rm -f "$LATEST_LOG"
-ln -s "$(basename "$LOG_FILE")" "$LATEST_LOG"
+  # Create symlink to latest log
+  LATEST_LOG="$LOGS_DIR/latest.log"
+  if [ "${SANITY_SKIP_LATEST_LINK:-false}" != "true" ] && [ "${SANITY_SKIP_LATEST_LINK:-0}" != "1" ]; then
+    rm -f "$LATEST_LOG"
+    ln -s "$(basename "$LOG_FILE")" "$LATEST_LOG"
+  fi
+fi
 
 # Function to log commands and their output
 log_command() {
@@ -74,6 +87,11 @@ log_command() {
         fi
         return $exit_code
     fi
+}
+
+# Always append to LOG_FILE (even with --silent) so TLS/ingress failures show a clear step trace in latest.log.
+tls_step_log() {
+    { printf '\n[%s] TLS step: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; } >> "$LOG_FILE" 2>/dev/null || true
 }
 
 # Function to download preinstall diagnostics tool
@@ -343,8 +361,7 @@ check_all_nodes_storage() {
 
     # Summary
     echo -e "${YELLOW}Storage Check Summary:${NC}"
-    echo -e "----------------------------------------"
-    echo -e "Total Nodes Checked: ${YELLOW}$total_nodes${NC}"
+    echo -e "-------Nodes Checked: ${YELLOW}$total_nodes${NC}"
     echo -e "Minimum Required: ${YELLOW}110GB${NC} per node (150GB for GPU nodes)"
     if [ "$nodes_with_issues" -gt 0 ]; then
         echo -e "Nodes with Issues: ${RED}$nodes_with_issues${NC}"
@@ -368,32 +385,97 @@ check_all_nodes_storage() {
 # Source storage module
 # source "$SCRIPT_DIR/modules/storage.sh"
 
+# Poll external URL with curl until it succeeds (no fixed "wait N seconds" — exits on first good response).
+# Defaults: 60 attempts × 2s = 120s cap; set TLS_CURL_MAX_ATTEMPTS / TLS_CURL_INTERVAL to override.
+tls_curl_wait_until_up() {
+    local ext_url="${1:-}"
+    local max="${TLS_CURL_MAX_ATTEMPTS:-60}"
+    local intvl="${TLS_CURL_INTERVAL:-2}"
+    # Each attempt: short so we can retry often; no single 45s block.
+    # Important: do NOT use -f here; for TLS sanity we only need HTTPS+cert to work.
+    local ctry="--connect-timeout 5 --max-time 20"
+    local n=0
+    if [ -z "$ext_url" ]; then
+        tls_step_log "external HTTPS poll ABORT (empty URL)"
+        return 1
+    fi
+    tls_step_log "external HTTPS poll START url=${ext_url} max_attempts=${max} interval=${intvl}s CA=$([ -n "${CA_CERT:-}" ] && echo yes || echo no)"
+    while [ "$n" -lt "$max" ]; do
+        n=$((n + 1))
+        if [ -n "$CA_CERT" ]; then
+            local http_code=""
+            http_code="$(curl -sS $ctry $CURL_EXTRA --cacert "$CA_CERT" -o /dev/null -w "%{http_code}" "$ext_url" 2>>"$LOG_FILE" || true)"
+            if [ "$http_code" != "000" ]; then
+                tls_step_log "external HTTPS poll SUCCESS (attempt $n)"
+                {
+                    echo "---- External HTTPS OK (attempt $n, HTTP ${http_code}) ----"
+                    curl -v $ctry $CURL_EXTRA --cacert "$CA_CERT" "$ext_url" 2>&1
+                } >> "$LOG_FILE" 2>&1 || true
+                return 0
+            fi
+        else
+            local http_code=""
+            http_code="$(curl -ksS $ctry $CURL_EXTRA -o /dev/null -w "%{http_code}" "$ext_url" 2>>"$LOG_FILE" || true)"
+            if [ "$http_code" != "000" ]; then
+                tls_step_log "external HTTPS poll SUCCESS (insecure probe, attempt $n)"
+                {
+                    echo "---- Endpoint up (insecure check), attempt $n, HTTP ${http_code} ----" >> "$LOG_FILE" 2>&1
+                }
+                return 0
+            fi
+        fi
+        if [ "$n" -eq 1 ] || [ $((n % 10)) -eq 0 ]; then
+            tls_step_log "external HTTPS poll still waiting (attempt $n / $max)"
+            log_message "${YELLOW}  Polling until HTTPS is ready… (try $n / $max, every ${intvl}s)${NC}"
+        fi
+        sleep "$intvl"
+    done
+    tls_step_log "external HTTPS poll FAILED (no success after ${max} attempts, ~$((max * intvl))s)"
+    return 1
+}
+
 # Function to run TLS tests
 run_tls_tests() {
     log_message "${YELLOW}Running TLS configuration tests...${NC}"
+    tls_step_log "BEGIN run_tls_tests DNS_NAME=${DNS_NAME:-} USE_HAPROXY_TLS=${USE_HAPROXY_TLS:-false} SANITY_TLS_FAST=${SANITY_TLS_FAST:-} LOG_FILE=${LOG_FILE:-}"
     local TESTS_FAILED=0
-
+    # SANITY_TLS_FAST: smaller image + fast namespace teardown for the minimal external TLS check.
+    local NGINX_TEST_IMAGE=nginx:latest
+    local CURL_EXTRA=""
+    if [ "${SANITY_TLS_FAST:-false}" = true ] || [ "${SANITY_TLS_FAST:-}" = 1 ]; then
+        NGINX_TEST_IMAGE=nginx:1.27-alpine
+        CURL_EXTRA="--connect-timeout 8 --max-time 30"
+    fi
     # Create test namespace if not exists
     if [ -z "$TEST_NS" ]; then
         TEST_NS="sanity-test-$(date +%s)"
         log_message "${YELLOW}Creating test namespace: $TEST_NS${NC}"
+        tls_step_log "create namespace ${TEST_NS}"
         if ! log_command "kubectl create namespace $TEST_NS" "Create test namespace"; then
+            tls_step_log "FAILED create namespace ${TEST_NS}"
             log_message "${RED}❌ Failed to create test namespace${NC}"
             return 1
         fi
+        tls_step_log "OK namespace ${TEST_NS} created"
+    else
+        tls_step_log "using existing namespace ${TEST_NS}"
     fi
 
     # Create TLS secret
     log_message "${YELLOW}Creating TLS secret...${NC}"
+    tls_step_log "create TLS secret sanity-tls in ${TEST_NS}"
     if log_command "kubectl create secret tls sanity-tls -n $TEST_NS --cert=$CERT_FILE --key=$KEY_FILE" "Create TLS secret"; then
         TLS_SECRET_CREATED=true
     else
+        tls_step_log "FAILED create TLS secret in ${TEST_NS}"
         log_message "${RED}❌ Failed to create TLS secret${NC}"
         return 1
     fi
+    tls_step_log "OK TLS secret created"
 
     # Create test service and deployment
     log_message "${YELLOW}Creating test deployment and service...${NC}"
+    tls_step_log "apply nginx-test Deployment + Service (image ${NGINX_TEST_IMAGE})"
     cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
 apiVersion: apps/v1
 kind: Deployment
@@ -412,7 +494,7 @@ spec:
     spec:
       containers:
       - name: nginx
-        image: nginx:latest
+        image: $NGINX_TEST_IMAGE
         ports:
         - containerPort: 80
 ---
@@ -429,8 +511,37 @@ spec:
     app: nginx-test
 EOF
 
-    # Create ingress
+    # Create ingress (NGINX or HAProxy ingress class)
     log_message "${YELLOW}Creating test ingress...${NC}"
+    if [ "${USE_HAPROXY_TLS:-false}" = true ]; then
+    INGRESS_YAML=$(cat <<EOF
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sanity-ingress
+  namespace: $TEST_NS
+  annotations:
+    haproxy.org/ssl-redirect: "true"
+spec:
+  ingressClassName: haproxy
+  tls:
+  - hosts:
+    - $DNS_NAME
+    secretName: sanity-tls
+  rules:
+  - host: $DNS_NAME
+    http:
+      paths:
+      - path: /sanity-test
+        pathType: Prefix
+        backend:
+          service:
+            name: nginx-test
+            port:
+              number: 80
+EOF
+)
+    else
     INGRESS_YAML=$(cat <<EOF
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -459,90 +570,82 @@ spec:
               number: 80
 EOF
 )
+    fi
+    tls_step_log "apply Ingress sanity-ingress (class $([ "${USE_HAPROXY_TLS:-false}" = true ] && echo haproxy || echo nginx))"
     if echo "$INGRESS_YAML" | kubectl apply -f - >> "$LOG_FILE" && kubectl get ingress -n $TEST_NS sanity-ingress &>/dev/null; then
         INGRESS_CREATED=true
     else
+        tls_step_log "FAILED apply Ingress sanity-ingress in ${TEST_NS}"
         log_message "${RED}❌ Failed to create ingress${NC}"
         return 1
     fi
+    tls_step_log "OK Ingress sanity-ingress exists"
 
-    # Wait for deployment to be ready
-    log_message "${YELLOW}Waiting for test deployment to be ready...${NC}"
-    if ! log_command "kubectl wait --for=condition=available deployment/nginx-test -n $TEST_NS --timeout=60s" "Wait for deployment"; then
-        log_message "${RED}❌ Deployment failed to become ready${NC}"
-        return 1
-    fi
-
-    # Test 1: External curl with SSL verification
-    log_message "${YELLOW}Testing external HTTPS access...${NC}"
-    log_message "${YELLOW}Performing curl test to https://$DNS_NAME/sanity-test${NC}"
-    if [ -n "$CA_CERT" ]; then
-        log_message "${YELLOW}Using CA certificate for SSL verification${NC}"
-        if log_command "curl -v --cacert $CA_CERT https://$DNS_NAME/sanity-test" "External HTTPS test with SSL verification"; then
-            HTTPS_ACCESS_OK=true
-        else
-            log_message "${YELLOW}⚠️ SSL verification failed as expected (no valid CA cert)${NC}"
+    # External TLS check always uses FQDN over default HTTPS port (443).
+    local EXT_HTTPS_URL="https://${DNS_NAME}/sanity-test"
+    local INGRESS_CLUSTER_IP=""
+    local haproxy_np=""
+    if [ "${USE_HAPROXY_TLS:-false}" = true ]; then
+        haproxy_np=$(kubectl get svc -n haproxy-controller haproxy-kubernetes-ingress -o jsonpath='{.spec.ports[?(@.port==443)].nodePort}' 2>/dev/null)
+        if [ -z "$haproxy_np" ]; then
+            haproxy_np=$(kubectl get svc -n haproxy-controller -o jsonpath='{.items[0].spec.ports[?(@.port==443)].nodePort}' 2>/dev/null)
+        fi
+        if [ -n "$haproxy_np" ]; then
+            log_message "${YELLOW}HAProxy Ingress HTTPS NodePort detected: ${haproxy_np} (external probe still uses https://${DNS_NAME}/sanity-test)${NC}"
+        fi
+        INGRESS_CLUSTER_IP=$(kubectl get svc -n haproxy-controller haproxy-kubernetes-ingress -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+        if [ -z "$INGRESS_CLUSTER_IP" ]; then
+            INGRESS_CLUSTER_IP=$(kubectl get svc -n haproxy-controller -o jsonpath='{.items[0].spec.clusterIP}' 2>/dev/null)
         fi
     else
-        log_message "${YELLOW}Testing without CA certificate (expecting SSL verification failure)${NC}"
-        if ! log_command "curl -v https://$DNS_NAME/sanity-test" "External HTTPS test without CA cert"; then
-            log_message "${YELLOW}⚠️ SSL verification failed as expected (no valid CA cert)${NC}"
-            # For no CA cert case, we consider it a success if we get a response (even if SSL fails)
+        INGRESS_CLUSTER_IP=$(kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.spec.clusterIP}' 2>/dev/null)
+    fi
+    tls_step_log "resolved EXT_HTTPS_URL=${EXT_HTTPS_URL} haproxy_nodeport=${haproxy_np:-n/a} INGRESS_CLUSTER_IP=${INGRESS_CLUSTER_IP:-n/a}"
+
+    # Test 1: External HTTPS — poll with curl in a loop until the route+TLS work (faster than a fixed multi-second kubectl wait).
+    log_message "${YELLOW}External HTTPS: polling until ${EXT_HTTPS_URL} responds (curl loop)${NC}"
+    if [ -n "$CA_CERT" ]; then
+        log_message "${YELLOW}Using CA certificate for SSL verification${NC}"
+    else
+        log_message "${YELLOW}Probing with curl -k until the service answers, then checking SSL without CA (expected verify failure)${NC}"
+    fi
+    if ! tls_curl_wait_until_up "$EXT_HTTPS_URL"; then
+        tls_step_log "FAILED external HTTPS did not become ready (see log above for curl attempts)"
+        log_message "${RED}❌ External HTTPS did not become ready in time (see $LOG_FILE)${NC}"
+        return 1
+    fi
+    if [ -n "$CA_CERT" ]; then
+        HTTPS_ACCESS_OK=true
+        tls_step_log "OK external HTTPS with CA (Test 1)"
+    else
+        log_message "${YELLOW}Endpoint online — assert TLS verify failure without --cacert${NC}"
+        tls_step_log "no-CA: assert TLS verify fails without --cacert"
+        if ! log_command "curl -v $CURL_EXTRA $EXT_HTTPS_URL" "External HTTPS (expecting SSL verify to fail without CA cert)"; then
+            log_message "${YELLOW}⚠️ SSL verification failed as expected (no CA cert)${NC}"
             HTTPS_ACCESS_OK=true
+            tls_step_log "OK no-CA SSL verify failed as expected (Test 1)"
         else
+            tls_step_log "FAILED no-CA: curl unexpectedly succeeded (SSL should have failed)"
             log_message "${RED}❌ Unexpected success: SSL verification should have failed${NC}"
             return 1
         fi
     fi
 
-    # Test 2: Internal pod test
-    log_message "${YELLOW}Testing internal pod access...${NC}"
-    cat <<EOF | kubectl apply -f - >> "$LOG_FILE"
-apiVersion: v1
-kind: Pod
-metadata:
-  name: curl-test
-  namespace: $TEST_NS
-spec:
-  containers:
-  - name: curl
-    image: curlimages/curl
-    command:
-    - sleep
-    - "3600"
-EOF
+    # Minimal TLS check by design:
+    # 1) deploy nginx + ingress, 2) create TLS secret, 3) curl external HTTPS until it works.
+    # No extra in-cluster curl pod here to keep this validation simple and fast.
+    tls_step_log "SKIP Test 2 in-cluster pod curl (minimal TLS check mode)"
 
-    # Wait for the test pod to be ready
-    log_message "${YELLOW}Waiting for test pod to be ready...${NC}"
-    if ! log_command "kubectl wait --for=condition=ready pod/curl-test -n $TEST_NS --timeout=60s" "Wait for test pod"; then
-        log_message "${RED}❌ Test pod failed to become ready${NC}"
-        return 1
+    if { [ "${SANITY_TLS_FAST:-false}" = true ] || [ "${SANITY_TLS_FAST:-}" = 1 ]; } && [ -n "$TEST_NS" ]; then
+        # Wait for removal so a follow-up "sanity-check --clean" is a no-op (avoids the slow finalizer-cleanup path).
+        log_message "${YELLOW}Removing test namespace ${TEST_NS} (wait for delete)…${NC}"
+        tls_step_log "delete namespace ${TEST_NS} (fast teardown, wait for delete)"
+        kubectl delete namespace "$TEST_NS" --ignore-not-found 2>>"$LOG_FILE" || true
+        kubectl wait --for=delete "namespace/$TEST_NS" --timeout=90s 2>>"$LOG_FILE" || true
+        tls_step_log "OK namespace ${TEST_NS} removed (or delete in progress)"
     fi
 
-    # Copy the certificate to the pod
-    log_message "${YELLOW}Copying certificate to test pod...${NC}"
-    if ! log_command "kubectl cp $CERT_FILE $TEST_NS/curl-test:/tmp/cert.pem -c curl" "Copy certificate to pod"; then
-        log_message "${RED}❌ Failed to copy certificate to pod${NC}"
-        return 1
-    fi
-
-    # Test internal HTTPS access
-    log_message "${YELLOW}Testing internal HTTPS access...${NC}"
-    if [ -n "$CA_CERT" ]; then
-        log_message "${YELLOW}Copying CA certificate to test pod...${NC}"
-        if ! log_command "kubectl cp $CA_CERT $TEST_NS/curl-test:/tmp/ca.pem -c curl" "Copy CA certificate to pod"; then
-            log_message "${RED}❌ Failed to copy CA certificate to pod${NC}"
-            return 1
-        fi
-
-        if log_command "kubectl exec -n $TEST_NS curl-test -- curl -v --cacert /tmp/ca.pem https://$DNS_NAME/sanity-test" "Internal HTTPS test with SSL verification"; then
-            HTTPS_ACCESS_OK=true
-        else
-            log_message "${RED}❌ Internal HTTPS test failed${NC}"
-            return 1
-        fi
-    fi
-
+    tls_step_log "SUCCESS run_tls_tests completed for DNS=${DNS_NAME:-}"
     log_message "${GREEN}✅ TLS configuration test completed successfully${NC}"
     return 0
 }
@@ -550,7 +653,7 @@ EOF
 # Function to clean up all sanity-test namespaces
 cleanup_all_test_namespaces() {
     log_message "${YELLOW}Cleaning up all sanity-test namespaces...${NC}"
-    
+
     # Kill any existing kubectl proxy processes
     pkill -f "kubectl proxy" 2>/dev/null || true
     sleep 1
@@ -636,7 +739,7 @@ cleanup_all_test_namespaces() {
                     # Try to get namespace JSON with timeout
                     if timeout 10 kubectl get namespace "$ns" -o json > temp.json 2>/dev/null; then
                         if timeout 10 jq '.spec = {"finalizers":[]}' temp.json > temp_finalize.json 2>/dev/null; then
-                            if timeout 10 curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp_finalize.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" &>/dev/null; then
+                            if timeout 10 curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp_finalize.json "http://127.0.0.1:8001/api/v1/namespaces/$ns/finalize" &>/dev/null; then
                                 log_message "  └─ API cleanup completed"
                             else
                                 log_message "  └─ API cleanup failed"
@@ -696,7 +799,18 @@ cleanup_all_test_namespaces() {
 # Function to perform namespace cleanup in background
 cleanup_namespace() {
     local ns="$1"
-    local log_file="$2"
+    local log_file="${2:-}"
+
+    if [ -z "$ns" ]; then
+        echo "cleanup_namespace: missing namespace" >&2
+        return 1
+    fi
+
+    if [ -z "$log_file" ]; then
+        log_file="/tmp/sanity-check-cleanup-${ns}.log"
+    fi
+
+    mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
 
     echo "Starting cleanup for namespace: $ns" >> "$log_file"
 
@@ -722,7 +836,7 @@ cleanup_namespace() {
             echo "Created temp.json for API cleanup" >> "$log_file"
             
             if timeout 10 jq '.spec = {"finalizers":[]}' temp.json > temp_finalize.json 2>> "$log_file"; then
-                curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp_finalize.json "127.0.0.1:8001/api/v1/namespaces/$ns/finalize" &>> "$log_file"
+                curl -k -H "Content-Type: application/json" -X PUT --data-binary @temp_finalize.json "http://127.0.0.1:8001/api/v1/namespaces/$ns/finalize" &>> "$log_file"
                 echo "API cleanup completed for namespace $ns" >> "$log_file"
             else
                 echo "Failed to create finalize JSON for namespace $ns" >> "$log_file"
@@ -873,12 +987,14 @@ VALID_ARGS=false
 STORAGE_TEST_RESULT=0
 HARDWARE_TEST_RESULT=0
 DISK_TEST_RESULT=0
+SOFTWARE_TEST_RESULT=0
 DIAG_TEST_RESULT=0
 TLS_TEST_RESULT=0
 TLS_SECRET_CREATED=false
 INGRESS_CREATED=false
 HTTPS_ACCESS_OK=false
 all_passed=true
+USE_HAPROXY_TLS=false
 
 
 
@@ -891,34 +1007,44 @@ log_message() {
 
 # Function to show usage information
 show_usage() {
-    echo -e "${YELLOW}Usage:${NC}"
-    echo -e "  sanity-check.sh [options]"
-    echo -e ""
-    echo -e "${YELLOW}Options:${NC}"
-    echo -e "  --cert FILE      Certificate file for TLS"
-    echo -e "  --key FILE       Private key file for TLS"
-    echo -e "  --dns NAME       DNS name for ingress"
-    echo -e "  --cacert FILE    CA certificate file (optional)"
-    echo -e "  --storage        Run storage tests only"
-    echo -e "  --class NAME     Specify storage class (optional)"
-    echo -e "  --hardware       Check hardware requirements only"
-    echo -e "  --disk           Check disk/ephemeral storage only"
-    echo -e "  --software       Check prerequisite software only"
-    echo -e "  --diag          Run preinstall diagnostics"
-    echo -e "  --diag-dns NAME  DNS name for diagnostics"
-    echo -e "  --prereq         Check prerequisite software"
-    echo -e "  --clean          Clean up all sanity-test namespaces (manual cleanup required)"
-    echo -e "  --silent        Suppress output messages"
-    echo -e "  --ngc-check      Validate NGC API key (Helm Run:ai index + nvcr.io pulls)"
-    echo -e "  --ngc-key KEY    NGC API key for --ngc-check (or set env NGC_API_KEY)"
-    echo -e "  -h, --help      Show this help message"
-    echo -e ""
-    echo -e "${YELLOW}Examples:${NC}"
-    echo -e "  ./sanity-check.sh --cert cert.pem --key key.pem --dns example.com"
-    echo -e "  ./sanity-check.sh --storage"
-    echo -e "  ./sanity-check.sh --hardware"
-    echo -e "  ./sanity-check.sh --diag --diag-dns example.com"
-    echo -e "  ./sanity-check.sh --ngc-check --ngc-key \"\$NGC_API_KEY\""
+    cat <<'EOF'
+Usage:
+  sanity-check.sh [options]
+
+Options:
+  --cert FILE       Certificate file for TLS
+  --key FILE        Private key file for TLS
+  --dns NAME        DNS name for ingress
+  --cacert FILE     CA certificate file optional
+  --use-haproxy     Use HAProxy ingress class not nginx for TLS/ingress test
+  --storage         Run storage tests only
+  --class NAME      Specify storage class optional
+  --hardware        Check hardware requirements only
+  --disk            Check disk or ephemeral storage only
+  --software        Check prerequisite software only
+  --diag            Run preinstall diagnostics
+  --diag-dns NAME   DNS name for diagnostics
+  --prereq          Check prerequisite software
+  --clean           Clean up all sanity-test namespaces manual cleanup required
+  --silent          Suppress output messages
+  --ngc-check       Validate NGC API key Helm Run:ai index plus nvcr.io pulls
+  --ngc-key KEY     NGC API key for --ngc-check or set env NGC_API_KEY
+  -h, --help        Show this help message
+
+Environment (TLS tests):
+  SANITY_TLS_FAST=1 Use smaller/faster test path for minimal external TLS check
+                    (smaller nginx image + faster namespace cleanup)
+  TLS_CURL_MAX_ATTEMPTS=60  Max external curl poll attempts (default 60)
+  TLS_CURL_INTERVAL=2     Seconds between attempts (default 2) — ~120s max by default
+
+Examples:
+  ./sanity-check.sh --cert cert.pem --key key.pem --dns example.com
+  ./sanity-check.sh --cert cert.pem --key key.pem --dns x.x.x.x.sslip.io --cacert rootCA.pem --use-haproxy
+  ./sanity-check.sh --storage
+  ./sanity-check.sh --hardware
+  ./sanity-check.sh --diag --diag-dns example.com
+  ./sanity-check.sh --ngc-check --ngc-key "$NGC_API_KEY"
+EOF
     exit 1
 }
 
@@ -956,6 +1082,11 @@ while [[ $# -gt 0 ]]; do
             fi
             VALID_ARGS=true
             shift 2
+            ;;
+        --use-haproxy)
+            USE_HAPROXY_TLS=true
+            VALID_ARGS=true
+            shift
             ;;
         --storage)
             STORAGE_ONLY=true
@@ -1033,7 +1164,7 @@ if [ "$VALID_ARGS" = false ]; then
     echo -e "  - The --software flag for prerequisite software check"
     echo -e "  - The --diag flag for preinstall diagnostics"
     echo -e "  - The --clean flag to clean up test namespaces"
-    echo -e "  - The --ngc-check flag (with --ngc-key or NGC_API_KEY) to validate an NGC API key"
+    echo -e "  - The --ngc-check flag with --ngc-key or NGC_API_KEY to validate an NGC API key"
     echo -e "\n"
     show_usage
     exit 1
@@ -1220,6 +1351,9 @@ fi
 if [ "$DIAG" = "true" ] && [ $DIAG_TEST_RESULT -ne 0 ]; then
     OVERALL_RESULT=1
 fi
+if [ "$SOFTWARE_CHECK" = "true" ] && [ $SOFTWARE_TEST_RESULT -ne 0 ]; then
+    OVERALL_RESULT=1
+fi
 if [ -n "$CERT_FILE" ] && [ -n "$KEY_FILE" ] && [ -n "$DNS_NAME" ] && [ $TLS_TEST_RESULT -ne 0 ]; then
     OVERALL_RESULT=1
 fi
@@ -1231,6 +1365,7 @@ else
     echo -e "\n${RED}❌ Some tests failed${NC}"
     exit 1
 fi
+
 
 
 

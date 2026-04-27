@@ -55,6 +55,22 @@ runai_ngc_apply_image_pull_secrets() {
     return 0
 }
 
+# Optional: $RUNAI_INSTALLER_DIR/runai_version — pin control-plane semver when using NGC so
+# --runai-version latest does not require a successful helm search (still adds NGC repo for install).
+runai_ngc_read_pinned_version_file() {
+    local root="${RUNAI_INSTALLER_DIR:-.}"
+    local f="$root/runai_version"
+    [ -f "$f" ] || return 1
+    local raw line ver
+    raw="$(grep -v '^[[:space:]]*#' "$f" 2>/dev/null | head -1 | tr -d '\r')"
+    line="$(printf '%s' "$raw" | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')"
+    [ -n "$line" ] || return 1
+    ver="$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    [ -n "$ver" ] || return 1
+    printf '%s' "$ver"
+    return 0
+}
+
 runai_ngc_add_repo() {
     if [ -z "${NGC_API_KEY:-}" ]; then
         echo -e "${RED}❌ NGC_API_KEY is required when using --ngc (set env NGC_API_KEY or pass --ngc-api-key)${NC}" >&2
@@ -68,6 +84,10 @@ runai_ngc_add_repo() {
     fi
     export NGC_API_KEY
 
+    runai_maybe_clean_helm_repos_for_artifact_flag
+
+    echo -e "${BLUE}Verifying NGC Helm index (https://helm.ngc.nvidia.com)…${NC}" >&2
+
     {
         echo ""
         echo "==== Add Run.ai NGC Helm repo ===="
@@ -77,19 +97,20 @@ runai_ngc_add_repo() {
     } >> "$LOG_FILE"
 
     # Preflight: verify NGC auth to the Run:ai Helm index before invoking helm.
+    # Must follow redirects (-L): NGC/CDN often returns 302 before the final 200 (same as sanity-check/modules/ngc-check.sh).
     local status_code
-    status_code="$(curl -sS -o /dev/null -w "%{http_code}" -u "\$oauthtoken:$NGC_API_KEY" "https://helm.ngc.nvidia.com/nvidia/runai/index.yaml" || true)"
-    echo "NGC preflight index.yaml HTTP status: $status_code" >> "$LOG_FILE"
+    status_code="$(
+        curl -sSL --connect-timeout 20 --max-time 120 -o /dev/null -w "%{http_code}" \
+            -u "\$oauthtoken:$NGC_API_KEY" "https://helm.ngc.nvidia.com/nvidia/runai/index.yaml" || true
+    )"
+    echo "NGC preflight index.yaml HTTP status (after redirects): $status_code" >> "$LOG_FILE"
     if [ "$status_code" != "200" ]; then
         echo -e "${RED}❌ NGC auth preflight failed (index.yaml HTTP $status_code)${NC}" >&2
-        echo -e "${YELLOW}Expected 200. 400/401/403 usually means invalid key format, expired key, or missing Run:ai entitlement in NGC.${NC}" >&2
+        echo -e "${YELLOW}Expected final HTTP 200 after redirects. 302 alone often meant missing ${BLUE}curl -L${NC}. 400/401/403 = invalid key or missing Run:ai entitlement.${NC}" >&2
         return 1
     fi
 
     # Must not write to stdout: get_latest_runai_version captures stdout from this function.
-    # Drop stale repos so Helm does not keep a wrong URL/credentials for the same chart name.
-    helm repo remove runai >>"$LOG_FILE" 2>&1 || true
-    helm repo remove runai-backend >>"$LOG_FILE" 2>&1 || true
 
     local ok=1
     if helm repo add runai https://helm.ngc.nvidia.com/nvidia/runai --force-update \

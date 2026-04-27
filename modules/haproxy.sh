@@ -9,6 +9,18 @@
 HAPROXY_NAMESPACE="${HAPROXY_NAMESPACE:-haproxy-controller}"
 HAPROXY_SERVICE_NAME="${HAPROXY_SERVICE_NAME:-haproxy-kubernetes-ingress}"
 
+haproxy_persist_external_ip_with_helm() {
+    local ip="$1"
+    if [ -z "$ip" ]; then
+        return 1
+    fi
+    if ! command -v helm >/dev/null 2>&1; then
+        return 1
+    fi
+    # Persist externalIPs in release values so later reconciles keep the selected worker IP.
+    log_command "helm upgrade haproxy-kubernetes-ingress haproxytech/kubernetes-ingress --namespace \"$HAPROXY_NAMESPACE\" --reuse-values --set-string controller.service.externalIPs[0]=\"$ip\" > /dev/null 2>&1" "Persist HAProxy externalIP in Helm values"
+}
+
 install_haproxy() {
     echo -e "${BLUE}Installing HAProxy Kubernetes Ingress...${NC}"
 
@@ -36,7 +48,12 @@ install_haproxy() {
 
     # Same flags as doc: helm install ... --namespace haproxy-controller --set controller.ingressClassResource.enabled=true ...
     # Use upgrade --install so a second run is safe if the release exists but detection above missed it.
-    if ! log_command "helm upgrade --install haproxy-kubernetes-ingress haproxytech/kubernetes-ingress --namespace haproxy-controller --create-namespace --set controller.ingressClassResource.enabled=true --set controller.service.type=NodePort --set controller.service.nodePorts.http=32080 --set controller.service.nodePorts.https=32443 > /dev/null 2>&1" "Install HAProxy Kubernetes Ingress"; then
+    local helm_install_cmd
+    helm_install_cmd="helm upgrade --install haproxy-kubernetes-ingress haproxytech/kubernetes-ingress --namespace haproxy-controller --create-namespace --set controller.ingressClassResource.enabled=true --set controller.service.type=NodePort --set controller.service.nodePorts.http=32080 --set controller.service.nodePorts.https=32443"
+    if [ -n "$IP_ADDRESS" ]; then
+        helm_install_cmd="$helm_install_cmd --set-string controller.service.externalIPs[0]=$IP_ADDRESS"
+    fi
+    if ! log_command "$helm_install_cmd > /dev/null 2>&1" "Install HAProxy Kubernetes Ingress"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to install HAProxy Ingress, continuing...${NC}"
         return 1
     fi
@@ -101,11 +118,10 @@ patch_haproxy_service() {
         return 1
     fi
 
-    echo -e "${BLUE}Patching HAProxy Ingress service with external IP: $IP_ADDRESS${NC}"
-    echo -e "${BLUE}Target: ${HAPROXY_NAMESPACE}/${HAPROXY_SERVICE_NAME} (same as --haproxy install)${NC}"
-
     local service_name=""
     local namespace="$HAPROXY_NAMESPACE"
+    local hpq=false
+    [ "${HAPROXY_PATCH_QUIET:-false}" = true ] && hpq=true
 
     # Prefer fixed Service from our Helm install: haproxy-controller / haproxy-kubernetes-ingress
     if kubectl get svc -n "$namespace" "$HAPROXY_SERVICE_NAME" &>/dev/null; then
@@ -123,14 +139,28 @@ patch_haproxy_service() {
         return 1
     fi
 
-    echo -e "${BLUE}Patching Service: $namespace/$service_name${NC}"
-
     local current_ip
     current_ip=$(kubectl get svc -n "$namespace" "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
     if [ "$current_ip" = "$IP_ADDRESS" ]; then
-        echo -e "${GREEN}✅ HAProxy Ingress already has externalIP: $IP_ADDRESS${NC}"
+        if [ "$hpq" != true ]; then
+            echo -e "${GREEN}✅ HAProxy Ingress already has externalIP: $IP_ADDRESS${NC}"
+        fi
         return 0
     fi
+
+    # --automatic: one patch + Helm persist, no chatty verify loop (clusters may reconcile spec.externalIPs oddly).
+    if [ "$hpq" = true ]; then
+        if log_command "kubectl patch svc -n \"$namespace\" \"$service_name\" --type='merge' -p '{\"spec\":{\"externalIPs\":[\"$IP_ADDRESS\"]}}'" "Patch HAProxy Ingress service (external IP)"; then
+            haproxy_persist_external_ip_with_helm "$IP_ADDRESS" >/dev/null 2>&1 || true
+            return 0
+        fi
+        echo -e "${RED}❌ Failed to patch HAProxy Ingress service${NC}" >&2
+        return 1
+    fi
+
+    echo -e "${BLUE}Patching HAProxy Ingress service with external IP: $IP_ADDRESS${NC}"
+    echo -e "${BLUE}Target: ${HAPROXY_NAMESPACE}/${HAPROXY_SERVICE_NAME} (same as --haproxy install)${NC}"
+    echo -e "${BLUE}Patching Service: $namespace/$service_name${NC}"
 
     if [ -n "$current_ip" ]; then
         echo -e "${YELLOW}⚠️ Warning: HAProxy Ingress currently has externalIP: $current_ip — changing to: $IP_ADDRESS${NC}"
@@ -141,14 +171,30 @@ patch_haproxy_service() {
         return 1
     fi
 
+    haproxy_persist_external_ip_with_helm "$IP_ADDRESS" >/dev/null 2>&1 || true
+
     local new_ip
     new_ip=$(kubectl get svc -n "$namespace" "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
-    if [ "$new_ip" = "$IP_ADDRESS" ]; then
-        echo -e "${GREEN}✅ HAProxy Ingress patched with externalIP: $IP_ADDRESS${NC}"
-        return 0
+    if [ "$new_ip" != "$IP_ADDRESS" ]; then
+        echo -e "${RED}❌ Patch did not set expected external IP (got: ${new_ip:-empty})${NC}"
+        return 1
     fi
 
-    echo -e "${RED}❌ Patch did not set expected external IP (got: ${new_ip:-empty})${NC}"
+    # Verify the field remains after short reconciles; if it disappears, retry via Helm + patch.
+    local attempt
+    for attempt in 1 2 3; do
+        sleep 2
+        new_ip=$(kubectl get svc -n "$namespace" "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
+        if [ "$new_ip" = "$IP_ADDRESS" ]; then
+            echo -e "${GREEN}✅ HAProxy Ingress patched with externalIP: $IP_ADDRESS${NC}"
+            return 0
+        fi
+        haproxy_persist_external_ip_with_helm "$IP_ADDRESS" >/dev/null 2>&1 || true
+        kubectl patch svc -n "$namespace" "$service_name" --type='merge' -p "{\"spec\":{\"externalIPs\":[\"$IP_ADDRESS\"]}}" >/dev/null 2>&1 || true
+    done
+
+    new_ip=$(kubectl get svc -n "$namespace" "$service_name" -o jsonpath='{.spec.externalIPs[0]}' 2>/dev/null)
+    echo -e "${RED}❌ externalIP is reverted after patch (current: ${new_ip:-empty})${NC}"
     return 1
 }
 
