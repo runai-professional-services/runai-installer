@@ -1,0 +1,55 @@
+# NVIDIA GPU Operator — Bright Cluster Manager (BCM) host layout: containerd under /cm/local/apps/containerd/.
+# Chart pin is in prerequisites.sh (default v25.10.1). Used when the installer detects BCM on this host,
+# or when GPU_OPERATOR_VALUES_PROFILE=bcm / RUNAI_BCM_CLUSTER=true.
+#
+# Optional merge: GPU_OPERATOR_HELM_VALUES_FILE (applied after this file).
+
+cdi:
+  default: true
+  enabled: true
+dcgm:
+  enabled: false
+dcgmExporter:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+devicePlugin:
+  enabled: true
+  env:
+    - name: DEVICE_LIST_STRATEGY
+      value: cdi-cri,cdi-annotations,volume-mounts
+driver:
+  enabled: false
+  rdma:
+    enabled: false
+kataManager:
+  enabled: false
+  env:
+    - name: CONTAINERD_CONFIG
+      value: /cm/local/apps/containerd/var/etc/conf.d/yy-kata-containers.toml
+mig:
+  strategy: single
+migManager:
+  enabled: true
+nfd:
+  enabled: true
+sandboxWorkloads:
+  enabled: false
+toolkit:
+  enabled: false
+  env:
+    - name: RUNTIME_EXECUTABLE_PATH
+      value: /cm/local/apps/containerd/current/bin/containerd
+    - name: CONTAINERD_CONFIG
+      value: /cm/local/apps/containerd/var/etc/conf.d/nvidia-cri.toml
+    - name: ACCEPT_NVIDIA_VISIBLE_DEVICES_ENVVAR_WHEN_UNPRIVILEGED
+      value: "false"
+    - name: ACCEPT_NVIDIA_VISIBLE_DEVICES_AS_VOLUME_MOUNTS
+      value: "true"
+    - name: NVIDIA_RUNTIME_SET_AS_DEFAULT
+      value: "true"
+validator:
+  driver:
+    env:
+      - name: DISABLE_DEV_CHAR_SYMLINK_CREATION
+        value: "true"

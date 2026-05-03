@@ -12,7 +12,7 @@
 #   tls        — sanity-check.sh --dns … --use-haproxy (ingress + HTTPS)
 #   storage    — default StorageClass + storage test if not already run in preflight
 #
-# Expects GREEN/YELLOW/BLUE/RED/NC from runai-installer.sh.
+# Expects GREEN/YELLOW/BLUE/CYAN/RED/NC from runai-installer.sh (CYAN section headers; plan bullets use default terminal fg like node rows).
 # Env: AUTOMATIC_STOP_AFTER=phase — exit successfully after that phase (debugging).
 # Env: NGC_API_KEY + RUNAI_ARTIFACT_SOURCE=ngc from --ngc-key (for chained --ngc install).
 
@@ -109,7 +109,14 @@ automatic_resolve_runai_version_for_automatic() {
 
     local raw detected
     raw="$(get_latest_runai_version)" || {
-        echo -e "${RED}❌ Could not resolve Run:ai version (Helm repo / NGC key, or ${REPO_ROOT:-.}/runai_version).${NC}" >&2
+        case "${RUNAI_ARTIFACT_SOURCE:-jfrog}" in
+            ngc)
+                echo -e "${RED}❌ Could not resolve Run:ai version (NGC Helm repo + API key, or pin file ${REPO_ROOT:-.}/runai_version).${NC}" >&2
+                ;;
+            *)
+                echo -e "${RED}❌ Could not resolve Run:ai version (JFrog: \`helm search repo runai-backend/control-plane\` after adding the runai-backend repo).${NC}" >&2
+                ;;
+        esac
         return 1
     }
     detected="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
@@ -150,19 +157,139 @@ automatic_abs_path() {
     esac
 }
 
+# Reject rpm/dpkg noise and other non-version strings for the plan banner.
+automatic_bcm_version_string_is_valid() {
+    local s="$1"
+    [ -z "$s" ] && return 1
+    if echo "$s" | grep -qiE 'not installed|is not installed|no package|no packages|\(none\)|unable to find|error:|^usage|usage:'; then
+        return 1
+    fi
+    if echo "$s" | grep -qiF 'cluster manager'; then
+        echo "$s" | grep -qE '[0-9]+\.[0-9]+' || return 1
+    fi
+    return 0
+}
+
+# Bright VCM / cmsh: official version table — main mode → versioninfo (full Cluster Manager row).
+# Example line:  Cluster Manager          11.0
+automatic_detect_bcm_version_from_cmsh() {
+    local out line ver
+    if ! command -v cmsh &>/dev/null; then
+        return 1
+    fi
+    out=$(cmsh -c "main; versioninfo" 2>/dev/null || true)
+    if ! echo "$out" | grep -qF 'Cluster Manager'; then
+        return 1
+    fi
+    line=$(printf '%s\n' "$out" | grep -F 'Cluster Manager' | head -1)
+    line=$(printf '%s' "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    ver=$(printf '%s' "$line" | awk '{
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^[0-9][0-9]*(\.[0-9]+)*(-[[:alnum:].]+)?$/) { print $i; exit }
+      }
+    }')
+    if [ -z "$ver" ]; then
+        ver=$(printf '%s' "$line" | awk '{ print $NF }')
+    fi
+    ver=$(printf '%s' "$ver" | tr -d '\r\n\t ')
+    if [ -z "$ver" ] || ! automatic_bcm_version_string_is_valid "$line"; then
+        return 1
+    fi
+    printf '%s' "$line"
+    return 0
+}
+
+# Best-effort Bright Cluster Manager (BCM) product version on the host running the installer.
+# Primary: cmsh -c "main; versioninfo" (full "Cluster Manager …" row). Override: RUNAI_BCM_VERSION="11.0" or full row.
+automatic_detect_bcm_version() {
+    local v=""
+    v=$(automatic_detect_bcm_version_from_cmsh 2>/dev/null) || true
+    if automatic_bcm_version_string_is_valid "$v"; then
+        printf '%s' "$v"
+        return 0
+    fi
+
+    if [ -r /cm/local/apps/cm-setup/version ]; then
+        v=$(tr -d ' \t\r\n' </cm/local/apps/cm-setup/version)
+        if automatic_bcm_version_string_is_valid "$v"; then
+            printf '%s' "$v"
+            return 0
+        fi
+    fi
+    if [ -r /etc/bright-release ]; then
+        v=$(grep -E '^(VERSION|BCM_VERSION)=' /etc/bright-release 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' \t\r\n')
+        if automatic_bcm_version_string_is_valid "$v"; then
+            printf '%s' "$v"
+            return 0
+        fi
+    fi
+    if command -v rpm &>/dev/null; then
+        if rpm -q cm-setup &>/dev/null; then
+            v=$(rpm -q cm-setup --queryformat '%{VERSION}-%{RELEASE}' 2>/dev/null || true)
+            if automatic_bcm_version_string_is_valid "$v"; then
+                printf '%s' "$v"
+                return 0
+            fi
+        fi
+        if rpm -q bright-cluster-manager &>/dev/null; then
+            v=$(rpm -q bright-cluster-manager --queryformat '%{VERSION}-%{RELEASE}' 2>/dev/null || true)
+            if automatic_bcm_version_string_is_valid "$v"; then
+                printf '%s' "$v"
+                return 0
+            fi
+        fi
+    fi
+    if command -v dpkg-query &>/dev/null; then
+        if dpkg-query -s cm-setup 2>/dev/null | grep -q '^Status: install ok installed'; then
+            v=$(dpkg-query -W -f '${Version}' cm-setup 2>/dev/null || true)
+            if automatic_bcm_version_string_is_valid "$v"; then
+                printf '%s' "$v"
+                return 0
+            fi
+        fi
+    fi
+    return 1
+}
+
 automatic_print_plan_summary() {
-    local ctx server_line
+    local ctx server_line bcm_ver plan_lbl_fmt lbl
+    plan_lbl_fmt="%-26s"
     ctx=$(kubectl config current-context 2>/dev/null || echo "unknown")
     server_line=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || true)
+
+    bcm_ver="${RUNAI_BCM_VERSION:-}"
+    if [ -z "$bcm_ver" ]; then
+        bcm_ver=$(automatic_detect_bcm_version 2>/dev/null || true)
+    fi
+    if [ -n "$bcm_ver" ] && ! automatic_bcm_version_string_is_valid "$bcm_ver"; then
+        bcm_ver=""
+    fi
 
     echo ""
     echo -e "${BLUE}╔══════════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║${NC}  ${GREEN}Run:ai automatic preparation — planned actions${NC}"
     echo -e "${BLUE}╚══════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    echo -e "  ${YELLOW}Kubernetes context:${NC}  ${ctx}"
+    printf -v lbl "$plan_lbl_fmt" "Kubernetes context:"
+    echo -e "  ${YELLOW}${lbl}${NC}${ctx}"
     if [ -n "$server_line" ]; then
-        echo -e "  ${YELLOW}API server:${NC}          ${server_line}"
+        printf -v lbl "$plan_lbl_fmt" "API server:"
+        echo -e "  ${YELLOW}${lbl}${NC}${server_line}"
+    fi
+    if [ -n "$bcm_ver" ]; then
+        local bcm_num bcm_lbl
+        bcm_num="$bcm_ver"
+        if echo "$bcm_ver" | grep -qF 'Cluster Manager'; then
+            bcm_num=$(printf '%s' "$bcm_ver" | awk '{
+              for (i = 1; i <= NF; i++) {
+                if ($i ~ /^[0-9][0-9]*(\.[0-9]+)*(-[[:alnum:].]+)?$/) { print $i; exit }
+              }
+            }')
+            [ -z "$bcm_num" ] && bcm_num=$(printf '%s' "$bcm_ver" | awk '{ print $NF }')
+        fi
+        bcm_num=$(printf '%s' "$bcm_num" | tr -d '\r\n\t ')
+        printf -v bcm_lbl "$plan_lbl_fmt" "BCM version:"
+        echo -e "  ${YELLOW}${bcm_lbl}${NC}${GREEN}${bcm_num}${NC}"
     fi
     automatic_print_nodes_brief
     echo ""
@@ -173,13 +300,14 @@ automatic_print_plan_summary() {
     automatic_print_worker_capacity_one_line 2>&1
     automatic_print_default_storage_class_one_line 2>&1
     echo ""
+    automatic_probe_stack
     automatic_print_component_status_brief
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
         automatic_print_openshift_preconfirm_preview
     fi
     echo ""
-    echo -e "  ${BLUE}Installation plan:${NC}"
-    echo -e "  Installs the latest NVIDIA Run:ai version and runs sanity checks for cluster readiness."
+    echo -e "  ${CYAN}Installation plan:${NC}"
+    automatic_print_installation_plan_will_do
     echo ""
     if [ "${AUTO_YES:-false}" = true ]; then
         echo -e "  ${GREEN}Non-interactive:${NC} ${BLUE}-y${NC} / ${BLUE}--yes${NC} is set (no confirmation prompts for this plan)."
@@ -194,9 +322,9 @@ automatic_print_default_storage_class_one_line() {
         sc=$(kubectl get storageclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
     fi
     if [ -z "$sc" ]; then
-        echo -e "${BLUE}Default storage class -->${NC} ${YELLOW}not found${NC}" >&2
+        echo -e "${CYAN}Default storage class -->${NC} ${YELLOW}not found${NC}" >&2
     else
-        echo -e "${BLUE}Default storage class -->${NC} ${GREEN}${sc}${NC}" >&2
+        echo -e "${CYAN}Default storage class -->${NC} ${GREEN}${sc}${NC}" >&2
     fi
 }
 
@@ -354,7 +482,7 @@ automatic_print_worker_capacity_one_line() {
         hw_color="${RED}"
     fi
 
-    echo -e "${BLUE}Total Workers:${NC} ${cpu_w} CPU, ~${mem_w_gib} GiB RAM, ${gpu_w} GPU — ${hw_color}${hw_status}${NC} ${YELLOW}(min ${min_cpu} CPU / ${min_mem_gib} GiB RAM)${NC}" >&2
+    echo -e "${CYAN}Total Workers:${NC} ${cpu_w} CPU, ~${mem_w_gib} GiB RAM, ${gpu_w} GPU — ${hw_color}${hw_status}${NC} ${YELLOW}(min ${min_cpu} CPU / ${min_mem_gib} GiB RAM)${NC}" >&2
 }
 
 automatic_print_node_inventory() {
@@ -582,19 +710,27 @@ automatic_sanity_cleanup_check_traces() {
 }
 
 automatic_probe_stack() {
-    # Prometheus: must match modules/prerequisites.sh (release "prometheus" → svc name below).
-    # Do not use "helm list | grep prometheus" — that false-positives on namespace "prometheus",
-    # runai-prometheus, chart names, etc. and skips the real install.
+    HAVE_NGINX=true
+
+    local HELM_RELEASES
+    HELM_RELEASES=$(helm list -A 2>/dev/null || true)
+    AUTOMATIC_HELM_LIST_JSON=$(helm list -A -o json 2>/dev/null || echo '[]')
+
+    # Prometheus: (1) this installer's path — release "prometheus" in ns monitoring + default svc name.
+    # (2) common alternate — chart kube-prometheus-stack (any release name), often namespace "prometheus"
+    #     (e.g. helm install kube-prometheus-stack -n prometheus). Do not grep bare "prometheus" on helm text.
     HAVE_PROMETHEUS=false
     if kubectl get ns monitoring &>/dev/null \
         && kubectl get svc -n monitoring prometheus-kube-prometheus-prometheus &>/dev/null; then
         HAVE_PROMETHEUS=true
     fi
-
-    HAVE_NGINX=true
-
-    local HELM_RELEASES
-    HELM_RELEASES=$(helm list -A 2>/dev/null || true)
+    if [ "$HAVE_PROMETHEUS" = false ]; then
+        if command -v jq &>/dev/null && printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -e '.[] | select(.chart | test("kube-prometheus-stack"))' >/dev/null 2>&1; then
+            HAVE_PROMETHEUS=true
+        elif echo "$HELM_RELEASES" | grep -qF 'kube-prometheus-stack'; then
+            HAVE_PROMETHEUS=true
+        fi
+    fi
 
     HAVE_GPU=false
     # Namespace-only checks produce false positives after uninstall; require a release or live GPU operator workloads.
@@ -614,37 +750,204 @@ automatic_probe_stack() {
     echo "$HELM_RELEASES" | grep -qE 'lws|local-workload-service' && HAVE_LWS=true
     kubectl get pods -A 2>/dev/null | grep -qi 'lws' && HAVE_LWS=true
 
+    HAVE_MPI=false
+    kubectl get crd mpijobs.kubeflow.org &>/dev/null && HAVE_MPI=true
+    if [ "$HAVE_MPI" = false ]; then
+        echo "$HELM_RELEASES" | grep -qE 'mpi-operator|cm-kubernetes-mpi-operator' && HAVE_MPI=true
+    fi
+
     HAVE_TRAINING=false
-    echo "$HELM_RELEASES" | grep -qE 'training-operator|kubeflow-training' && HAVE_TRAINING=true
-    kubectl get namespaces 2>/dev/null | grep -qE 'training-operator|kubeflow' && HAVE_TRAINING=true
+    kubectl get crd pytorchjobs.kubeflow.org &>/dev/null && HAVE_TRAINING=true
+    if [ "$HAVE_TRAINING" = false ]; then
+        echo "$HELM_RELEASES" | grep -qE 'training-operator|kubeflow-training' && HAVE_TRAINING=true
+    fi
+    if [ "$HAVE_TRAINING" = false ]; then
+        kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -qE '^(training-operator|kubeflow)$' && HAVE_TRAINING=true
+    fi
 
     if ! echo "$HELM_RELEASES" | grep -qE 'nginx|ingress-nginx' && ! kubectl get pods -A 2>/dev/null | grep -q 'ingress-nginx'; then
         HAVE_NGINX=false
     fi
+
+    HAVE_HAPROXY=false
+    if automatic_haproxy_ingress_present; then
+        HAVE_HAPROXY=true
+    fi
+
+    HAVE_ANY_STORAGECLASS=false
+    if kubectl get storageclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null | grep -q .; then
+        HAVE_ANY_STORAGECLASS=true
+    fi
+
+    # Optional Helm chart labels for the pre-confirm banner (jq is a runai-installer prerequisite).
+    AUTOMATIC_CHART_KNATIVE_OPERATOR=""
+    AUTOMATIC_CHART_GPU_OPERATOR=""
+    AUTOMATIC_CHART_PROMETHEUS=""
+    AUTOMATIC_KNATIVE_SERVING_SPEC_VERSION=""
+    if command -v jq &>/dev/null && [ -n "$AUTOMATIC_HELM_LIST_JSON" ]; then
+        AUTOMATIC_CHART_KNATIVE_OPERATOR=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.name == "knative-operator") | .chart' 2>/dev/null | head -1)
+        AUTOMATIC_CHART_GPU_OPERATOR=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.name == "gpu-operator" or .name == "nvidia-gpu-operator") | .chart' 2>/dev/null | head -1)
+        AUTOMATIC_CHART_PROMETHEUS=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.chart | test("kube-prometheus-stack")) | .chart' 2>/dev/null | head -1)
+        AUTOMATIC_CHART_MPI=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.chart | test("mpi-operator")) | .chart' 2>/dev/null | head -1)
+        AUTOMATIC_CHART_TRAINING=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select((.name == "training-operator" or .name == "kubeflow-training") or (.chart | test("training-operator"))) | .chart' 2>/dev/null | head -1)
+    fi
+    AUTOMATIC_KNATIVE_SERVING_SPEC_VERSION=$(kubectl get knativeserving knative-serving -n knative-serving -o jsonpath='{.spec.version}' 2>/dev/null || true)
+}
+
+# What automatic mode will do after confirmation (vanilla vs OpenShift).
+# Lists only missing prerequisite installs (no Run:ai upgrade line). Plain echo = same fg as node rows.
+automatic_print_installation_plan_will_do() {
+    if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
+        echo "  • Run OpenShift-oriented checks (NGC key if applicable, StorageClass / PVC, etc.)."
+        echo "  • Does not install Helm-based HAProxy, Nginx, kube-prometheus-stack, or upstream Knative — align those via OperatorHub if required."
+        return 0
+    fi
+
+    local any=false
+    if [ "$HAVE_PROMETHEUS" = false ]; then
+        echo "  • Install Prometheus Stack (kube-prometheus-stack, namespace monitoring)."
+        any=true
+    fi
+    if [ "$HAVE_GPU" = false ]; then
+        echo "  • Install NVIDIA GPU Operator."
+        any=true
+    fi
+    if [ "$HAVE_KNATIVE" = false ]; then
+        echo "  • Install Knative Serving via Knative Operator Helm chart (knative-operator/knative-operator, same recipe as one-click) + KnativeServing CR with Kourier."
+        any=true
+    fi
+    if [ "$HAVE_LWS" = false ]; then
+        echo "  • Install LWS (Local Workload Service)."
+        any=true
+    fi
+    if [ "$HAVE_MPI" = false ]; then
+        echo "  • Install Kubeflow MPI Operator (MPIJob)."
+        any=true
+    fi
+    if [ "$HAVE_TRAINING" = false ]; then
+        echo "  • Install Kubeflow Training Operator."
+        any=true
+    fi
+    if [ "$HAVE_HAPROXY" = false ]; then
+        echo "  • Install HAProxy Kubernetes Ingress."
+        echo "  • HAProxy networking will become default (using externalIPs)."
+        any=true
+    fi
+    if [ "$HAVE_ANY_STORAGECLASS" = false ]; then
+        echo "  • Install local-path provisioner and a default StorageClass if the cluster has none."
+        any=true
+    fi
+    if [ "$any" = false ]; then
+        echo "  (Nothing from this list is missing — automatic flow continues with Run:ai and remaining steps.)"
+    fi
 }
 
 # Shown in the pre-confirm plan (same signals as automatic_probe_stack / automatic_haproxy_ingress_present).
-# Fixed-width label column (longest: "HAProxy Ingress") so status text aligns.
+# Fixed-width label column so status text aligns.
 automatic_print_component_status_brief() {
-    local w=20 helm_note lbl
-    local fmt
+    local w=26 helm_note lbl fmt detail LBL
     fmt="%-${w}s"
+    LBL="${CYAN:-\033[0;36m}"
 
-    echo -e "  ${YELLOW}NVIDIA Run.ai prerequisites${NC}"
+    echo -e "  ${YELLOW}NVIDIA Run.ai prerequisites${NC}  ${LBL}(current cluster)${NC}"
 
     if command -v helm &>/dev/null; then
         helm_note="$(helm version --short 2>/dev/null || echo "?")"
         printf -v lbl "$fmt" "Helm CLI"
-        echo -e "  ${BLUE}${lbl}${NC} ${GREEN}present${NC} (${helm_note})"
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}  (${helm_note})"
     else
         printf -v lbl "$fmt" "Helm CLI"
-        echo -e "  ${BLUE}${lbl}${NC} ${YELLOW}missing${NC} (install/refresh in this run)"
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}missing${NC}  (will be bootstrapped after you confirm)"
     fi
 
     if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
-        :
+        printf -v lbl "$fmt" "Helm stack (vanilla)"
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}n/a on OpenShift${NC}  (see OpenShift operator hints below)"
+        return 0
+    fi
+
+    printf -v lbl "$fmt" "Prometheus Stack"
+    if [ "$HAVE_PROMETHEUS" = true ]; then
+        detail=""
+        [ -n "${AUTOMATIC_CHART_PROMETHEUS:-}" ] && detail="  (${AUTOMATIC_CHART_PROMETHEUS})"
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
     else
-        echo -e "  ${BLUE}Vanilla checks:${NC} Prometheus, GPU Operator, and HAProxy are auto-detected and installed if missing."
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install kube-prometheus-stack → monitoring)"
+    fi
+
+    printf -v lbl "$fmt" "NVIDIA GPU Operator"
+    if [ "$HAVE_GPU" = true ]; then
+        detail=""
+        [ -n "${AUTOMATIC_CHART_GPU_OPERATOR:-}" ] && detail="  (${AUTOMATIC_CHART_GPU_OPERATOR})"
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install if missing)"
+    fi
+
+    printf -v lbl "$fmt" "Knative Serving"
+    if [ "$HAVE_KNATIVE" = true ]; then
+        detail=""
+        if [ -n "${AUTOMATIC_CHART_KNATIVE_OPERATOR:-}" ]; then
+            detail="  (operator chart ${AUTOMATIC_CHART_KNATIVE_OPERATOR}"
+            [ -n "${AUTOMATIC_KNATIVE_SERVING_SPEC_VERSION:-}" ] && detail="${detail}, Serving spec ${AUTOMATIC_KNATIVE_SERVING_SPEC_VERSION}"
+            detail="${detail})"
+        elif [ -n "${AUTOMATIC_KNATIVE_SERVING_SPEC_VERSION:-}" ]; then
+            detail="  (KnativeServing spec ${AUTOMATIC_KNATIVE_SERVING_SPEC_VERSION})"
+        else
+            detail="  (knative-serving namespace or release detected)"
+        fi
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install: Knative Operator Helm + Serving CR + Kourier)"
+    fi
+
+    printf -v lbl "$fmt" "HAProxy Ingress"
+    if [ "$HAVE_HAPROXY" = true ]; then
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}  (haproxy-controller / HAProxyTech chart)"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install + patch externalIPs)"
+    fi
+
+    printf -v lbl "$fmt" "Nginx Ingress"
+    if [ "$HAVE_NGINX" = true ]; then
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (optional; not required for this automatic flow)"
+    fi
+
+    printf -v lbl "$fmt" "LWS"
+    if [ "$HAVE_LWS" = true ]; then
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install if missing)"
+    fi
+
+    printf -v lbl "$fmt" "MPI Operator"
+    if [ "$HAVE_MPI" = true ]; then
+        detail=""
+        [ -n "${AUTOMATIC_CHART_MPI:-}" ] && detail="  (${AUTOMATIC_CHART_MPI})"
+        [ -z "$detail" ] && kubectl get crd mpijobs.kubeflow.org &>/dev/null && detail="  (MPIJob CRD)"
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install if missing)"
+    fi
+
+    printf -v lbl "$fmt" "Training Operator"
+    if [ "$HAVE_TRAINING" = true ]; then
+        detail=""
+        [ -n "${AUTOMATIC_CHART_TRAINING:-}" ] && detail="  (${AUTOMATIC_CHART_TRAINING})"
+        [ -z "$detail" ] && kubectl get crd pytorchjobs.kubeflow.org &>/dev/null && detail="  (PyTorchJob CRD)"
+        [ -z "$detail" ] && detail="  (namespace or Helm release detected)"
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install if missing)"
+    fi
+
+    printf -v lbl "$fmt" "StorageClass"
+    if [ "$HAVE_ANY_STORAGECLASS" = true ]; then
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}none${NC}  (will install local-path + default class if still missing later)"
     fi
 }
 
@@ -667,15 +970,40 @@ automatic_install_missing_optional_components() {
     return $?
 }
 
-automatic_release_progress_line() {
+# Prefer oc on OpenShift so progress matches what users see from `oc get pods` (same kube context).
+_automatic_kubectl() {
+    if command -v oc >/dev/null 2>&1 \
+        && { [ "${RUNAI_K8S_DISTRIBUTION:-}" = "openshift" ] || [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; }; then
+        oc "$@"
+    else
+        kubectl "$@"
+    fi
+}
+
+# Sums main container ready/total from API (used when the kubectl table READY column sums to 0/0 but pods exist).
+automatic_pod_readiness_from_json() {
+    local ns="$1"
+    _automatic_kubectl get pods -n "$ns" -o json 2>/dev/null | jq -r '
+    ([.items[]? | .status.containerStatuses? // [] | .[]?] // [])
+    as $c
+    | (if ($c|length) == 0
+       then "0 0"
+       else
+         (($c | map(if .ready then 1 else 0 end) | add) as $r
+            | ($c | length) as $t
+            | "\($r) \($t)"
+         )
+       end
+    )' 2>/dev/null
+}
+
+# Internal: gather state for one release. Echoes "state|ready|total|n_pods|ns_exists".
+_automatic_release_state() {
     local ns="$1"
     local preferred_release="$2"
-    local label="$3"
     local release="$preferred_release"
     local helm_state="not-installed"
-    local ready="0"
-    local total="0"
-    local pod_counts=""
+    local ready="0" total="0" n_pods="0" pod_counts="" jq_line=""
 
     if [ -z "$release" ] || ! helm status "$release" -n "$ns" >/dev/null 2>&1; then
         release="$(helm list -n "$ns" --short 2>/dev/null | head -1 || true)"
@@ -684,15 +1012,10 @@ automatic_release_progress_line() {
         helm_state="$(helm status "$release" -n "$ns" -o json 2>/dev/null | jq -r '.info.status // "unknown"' 2>/dev/null || echo "unknown")"
     fi
 
-    pod_counts="$(kubectl get pods -n "$ns" --no-headers 2>/dev/null | awk '
+    pod_counts="$(_automatic_kubectl get pods -n "$ns" --no-headers 2>/dev/null | awk '
         BEGIN { r=0; t=0 }
-        {
-            split($2, a, "/");
-            if (a[1] ~ /^[0-9]+$/) r += a[1];
-            if (a[2] ~ /^[0-9]+$/) t += a[2];
-        }
-        END { printf "%d %d", r, t }
-    ')"
+        { split($2, a, "/"); if (a[1] ~ /^[0-9]+$/) r += a[1]; if (a[2] ~ /^[0-9]+$/) t += a[2]; }
+        END { printf "%d %d", r, t }')"
     if [ -n "$pod_counts" ]; then
         ready="$(printf '%s' "$pod_counts" | awk '{print $1}')"
         total="$(printf '%s' "$pod_counts" | awk '{print $2}')"
@@ -700,36 +1023,379 @@ automatic_release_progress_line() {
     [ -n "$ready" ] || ready="0"
     [ -n "$total" ] || total="0"
 
-    if [ "$helm_state" = "not-installed" ] && { [ -z "$total" ] || [ "$total" = "0" ]; }; then
-        echo "${label}: starting…"
+    n_pods="$(_automatic_kubectl get pods -n "$ns" -o json 2>/dev/null | jq '.items | length' 2>/dev/null | tr -d "[:space:]")"
+    case "$n_pods" in ''|*[!0-9]*) n_pods=0 ;; esac
+    # If jq is missing or JSON fetch fails, item count is still 0 while table listing shows pods — align with oc/kubectl -w.
+    if [ "$n_pods" -eq 0 ] 2>/dev/null; then
+        local plines
+        plines="$(_automatic_kubectl get pods -n "$ns" --no-headers 2>/dev/null | wc -l | tr -d '[:space:]')"
+        case "$plines" in ''|*[!0-9]*) plines=0 ;; esac
+        if [ "$plines" -gt 0 ] 2>/dev/null; then n_pods=$plines; fi
+    fi
+    if [ "$ready" = "0" ] && [ "$total" = "0" ] && [ "$n_pods" -gt 0 ] 2>/dev/null; then
+        jq_line="$(automatic_pod_readiness_from_json "$ns" || true)"
+        if [ -n "$jq_line" ]; then
+            ready="$(printf '%s' "$jq_line" | awk '{print $1}')"
+            total="$(printf '%s' "$jq_line" | awk '{print $2}')"
+        fi
+    fi
+    [ -n "$ready" ] || ready="0"
+    [ -n "$total" ] || total="0"
+
+    local ns_exists=false
+    if _automatic_kubectl get ns "$ns" >/dev/null 2>&1; then ns_exists=true; fi
+
+    printf '%s|%s|%s|%s|%s\n' "$helm_state" "$ready" "$total" "$n_pods" "$ns_exists"
+}
+
+# Compute 0..100 percentage for a single release given the structured state.
+_automatic_release_pct_from_state() {
+    local helm_state="$1" ready="$2" total="$3" n_pods="$4" ns_exists="$5"
+    local pct=0
+    case "$helm_state" in
+        deployed)
+            if [ "$total" -gt 0 ] 2>/dev/null && [ "$ready" -ge "$total" ] 2>/dev/null; then
+                pct=100
+            else
+                pct=30
+            fi
+            ;;
+        pending-install|pending-upgrade|pending-rollback)
+            pct=10
+            ;;
+        not-installed)
+            if [ "$ns_exists" = true ]; then pct=2; else pct=0; fi
+            ;;
+        *)
+            pct=15
+            ;;
+    esac
+    if [ "$total" -gt 0 ] 2>/dev/null; then
+        local ratio_pct=$(( ready * 85 / total ))
+        local cand=$(( 10 + ratio_pct ))
+        if [ "$pct" -lt "$cand" ]; then pct="$cand"; fi
+    elif [ "$n_pods" -gt 0 ] 2>/dev/null; then
+        if [ "$pct" -lt 10 ]; then pct=10; fi
+    fi
+    if [ "$pct" -lt 0 ]; then pct=0; fi
+    if [ "$pct" -gt 100 ]; then pct=100; fi
+    echo "$pct"
+}
+
+# Convert a status into the compact label used in display text.
+_automatic_helm_state_compact() {
+    case "$1" in
+        pending-install) echo "pending" ;;
+        pending-upgrade) echo "upgrading" ;;
+        pending-rollback) echo "rollback" ;;
+        uninstalling) echo "uninstall" ;;
+        uninstalled) echo "removed" ;;
+        superseded) echo "superseded" ;;
+        not-installed) echo "starting" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# Public: returns 0..100 progress for a single release.
+automatic_release_progress_pct() {
+    local ns="$1" preferred_release="$2"
+    local s helm_state ready total n_pods ns_exists
+    s="$(_automatic_release_state "$ns" "$preferred_release")"
+    IFS='|' read -r helm_state ready total n_pods ns_exists <<<"$s"
+    _automatic_release_pct_from_state "$helm_state" "$ready" "$total" "$n_pods" "$ns_exists"
+}
+
+# Format one progress line from a single _automatic_release_state snapshot (pipe-separated).
+# Use this with the same snapshot you pass to _automatic_release_pct_from_state so header/steps stay in sync.
+_automatic_release_format_line_from_state() {
+    local label="$1"
+    local s="$2"
+    local helm_state ready total n_pods ns_exists pct compact
+    IFS='|' read -r helm_state ready total n_pods ns_exists <<<"$s"
+    pct="$(_automatic_release_pct_from_state "$helm_state" "$ready" "$total" "$n_pods" "$ns_exists")"
+    compact="$(_automatic_helm_state_compact "$helm_state")"
+
+    if [ "$n_pods" -gt 0 ] 2>/dev/null && [ "$ready" = "0" ] && [ "$total" = "0" ]; then
+        echo "${label} [${pct}%] ${n_pods} pods (readiness pending, helm: ${compact})"
+        return 0
+    fi
+    # Do not claim "waiting for pods" if table/json already showed readiness work (fixes jq-less or flaky JSON paths).
+    if [ "$helm_state" = "not-installed" ] && [ "$n_pods" -eq 0 ] 2>/dev/null \
+        && [ "${total:-0}" -eq 0 ] 2>/dev/null && [ "${ready:-0}" -eq 0 ] 2>/dev/null; then
+        if [ "$ns_exists" = false ]; then
+            echo "${label} [${pct}%] waiting for namespace"
+        else
+            echo "${label} [${pct}%] waiting for pods"
+        fi
         return 0
     fi
 
-    echo "${label}: ${ready}/${total} pods ready (helm: ${helm_state})"
+    echo "${label} [${pct}%] ${ready}/${total} ready (helm: ${compact})"
+}
+
+automatic_release_progress_line() {
+    local ns="$1" preferred_release="$2" label="$3"
+    local s
+    s="$(_automatic_release_state "$ns" "$preferred_release")"
+    _automatic_release_format_line_from_state "$label" "$s"
+}
+
+# True when Step 1 backend snapshot indicates Helm deployed and all readiness counters satisfied.
+# Until then, Step 2 (runai namespace) must not surface stale helm failed/partial % from a prior run.
+_automatic_backend_gate_ok_from_snap() {
+    local s="$1"
+    local helm_state ready total
+    [ -n "$s" ] || return 1
+    IFS='|' read -r helm_state ready total _rest <<<"$s"
+    case "$(printf '%s' "$helm_state" | tr '[:upper:]' '[:lower:]')" in
+        deployed) ;;
+        *) return 1 ;;
+    esac
+    [ "${total:-0}" -gt 0 ] 2>/dev/null || return 1
+    [ "${ready:-0}" -ge "${total:-0}" ] 2>/dev/null || return 1
+    return 0
+}
+
+# Print up to N pods that are not Ready (READY column != "x/x" or status != Running/Completed).
+automatic_blocking_pods_summary() {
+    local ns="$1"
+    local limit="${2:-3}"
+    _automatic_kubectl get pods -n "$ns" --no-headers 2>/dev/null | awk -v lim="$limit" '
+        {
+            name=$1; ready=$2; status=$3
+            split(ready, a, "/")
+            ok = (a[1] != "" && a[1] == a[2] && a[1] != 0) || (status == "Completed" || status == "Succeeded")
+            if (!ok) {
+                if (count < lim) {
+                    if (count > 0) printf ", "
+                    printf "%s(%s,%s)", name, ready, status
+                    count++
+                } else if (count == lim) {
+                    extra++
+                }
+            }
+        }
+        END { if (extra > 0) printf " +%d more", extra }
+    '
+}
+
+# Truncate monitor lines so the 4-line block does not wrap (wrap breaks \033[4A redraw).
+_automatic_monitor_trunc_line() {
+    local s="$1"
+    local max="${2:-200}"
+    local len=${#s}
+    if [ "$len" -le "$max" ]; then
+        printf '%s' "$s"
+        return 0
+    fi
+    printf '%s…' "${s:0:$((max - 1))}"
+}
+
+# Writes 4 lines: backend_snap, runai_snap, backend_blocking, cluster_blocking (for async poll while spinner runs).
+_automatic_monitor_collect_snapshots() {
+    local out="$1"
+    local bs rs bb cb
+    bs="$(_automatic_release_state "runai-backend" "runai-backend" 2>/dev/null || true)"
+    rs="$(_automatic_release_state "runai" "runai" 2>/dev/null || true)"
+    bb="$(automatic_blocking_pods_summary runai-backend 3 2>/dev/null || true)"
+    cb="$(automatic_blocking_pods_summary runai 3 2>/dev/null || true)"
+    printf '%s\n%s\n%s\n%s\n' "$bs" "$rs" "$bb" "$cb" > "$out"
 }
 
 automatic_monitor_control_plane_install() {
     local child_pid="$1"
-    local backend_line=""
-    local cluster_line=""
-    local status_line=""
+    local started_ts now_ts elapsed_s elapsed_h elapsed_m elapsed_disp=""
+    local -a spinner_chars=($'\\' '|' '/' '-')
+    local spinner_idx=0
+    local first_render=true
+    local use_inplace=true
+    local term_cols=120
+    local cached_line1 cached_line2 cached_line3 cached_bar cached_pct
+    local snapf poll_pid
+    local backend_snap runai_snap backend_blocking cluster_blocking
+    local backend_line cluster_line backend_pct cluster_pct overall_pct
+    local bar_width filled empty bar i
+    local C_CYAN='' C_GREEN='' C_DIM='' C_RESET=''
+    local spin header line1 line2 line3
+
+    cached_line1="  Step 1 backend: [0%] starting"
+    cached_line2="  Step 2 runai:   [0%] pending"
+    cached_line3="  blocking — none"
+    cached_bar=""
+    i=0
+    while [ "$i" -lt 20 ]; do cached_bar+='▱'; i=$((i+1)); done
+    cached_pct=0
+
+    started_ts="$(date +%s 2>/dev/null || echo 0)"
+    if [ -t 1 ]; then
+        term_cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-120}")"
+        case "$term_cols" in ''|*[!0-9]*) term_cols=120 ;; esac
+        [ "$term_cols" -lt 40 ] 2>/dev/null && term_cols=120
+    else
+        use_inplace=false
+    fi
 
     while kill -0 "$child_pid" >/dev/null 2>&1; do
-        backend_line="$(automatic_release_progress_line "runai-backend" "runai-backend" "Step 1: runai-backend")"
-        cluster_line="$(automatic_release_progress_line "runai" "runai" "Step 2: runai")"
-
-        if [ -n "$backend_line" ] && [ -n "$cluster_line" ]; then
-            status_line="  ${backend_line} | ${cluster_line}"
-        elif [ -n "$backend_line" ]; then
-            status_line="  ${backend_line}"
-        elif [ -n "$cluster_line" ]; then
-            status_line="  ${cluster_line}"
-        else
-            status_line="  Two-step install: runai-backend → runai (preparing)…"
+        if [ "$use_inplace" = true ] && [ -t 1 ]; then
+            term_cols="$(tput cols 2>/dev/null || echo "${COLUMNS:-120}")"
+            case "$term_cols" in ''|*[!0-9]*) term_cols=120 ;; esac
+            if [ "$term_cols" -lt 40 ] 2>/dev/null; then term_cols=120; fi
         fi
-        echo -ne "\r${status_line}    "
 
-        sleep 8
+        snapf="$(mktemp "${TMPDIR:-/tmp}/runai-mon.XXXXXX")" || continue
+
+        if [ "$use_inplace" != true ] || [ ! -t 1 ]; then
+            _automatic_monitor_collect_snapshots "$snapf"
+        else
+            (_automatic_monitor_collect_snapshots "$snapf") &
+            poll_pid=$!
+            while kill -0 "$poll_pid" 2>/dev/null; do
+                if ! kill -0 "$child_pid" 2>/dev/null; then
+                    kill "$poll_pid" 2>/dev/null
+                    wait "$poll_pid" 2>/dev/null
+                    rm -f "$snapf"
+                    break 2
+                fi
+                now_ts="$(date +%s 2>/dev/null || echo "$started_ts")"
+                elapsed_s=$(( now_ts - started_ts ))
+                [ "$elapsed_s" -lt 0 ] && elapsed_s=0
+                elapsed_h=$(( elapsed_s / 3600 ))
+                elapsed_m=$(( (elapsed_s % 3600) / 60 ))
+                if [ "$elapsed_h" -gt 0 ]; then
+                    elapsed_disp="$(printf '%02dh%02dm' "$elapsed_h" "$elapsed_m")"
+                else
+                    elapsed_disp="$(printf '%02dm' "$elapsed_m")"
+                fi
+                C_CYAN=$'\033[36m'
+                C_GREEN=$'\033[32;1m'
+                C_DIM=$'\033[2m'
+                C_RESET=$'\033[0m'
+                spin="${spinner_chars[$spinner_idx]}"
+                spinner_idx=$(( (spinner_idx + 1) % ${#spinner_chars[@]} ))
+                header="$(printf '  %s%s%s installing Run:ai control plane — %s %s%3d%%%s   %selapsed %s%s' \
+                    "$C_CYAN" "$spin" "$C_RESET" \
+                    "$cached_bar" \
+                    "$C_GREEN" "$cached_pct" "$C_RESET" \
+                    "$C_DIM" "$elapsed_disp" "$C_RESET")"
+                line1="$cached_line1"
+                line2="$cached_line2"
+                line3="$cached_line3"
+                if [ -n "$term_cols" ] && [ "$term_cols" -ge 40 ] 2>/dev/null; then
+                    header="$(_automatic_monitor_trunc_line "$header" "$((term_cols - 1))")"
+                    line1="$(_automatic_monitor_trunc_line "$line1" "$((term_cols - 1))")"
+                    line2="$(_automatic_monitor_trunc_line "$line2" "$((term_cols - 1))")"
+                    line3="$(_automatic_monitor_trunc_line "$line3" "$((term_cols - 1))")"
+                fi
+                if [ "$first_render" = true ]; then
+                    printf '%s\n%s\n%s\n%s\n' "$header" "$line1" "$line2" "$line3"
+                    first_render=false
+                else
+                    printf '\033[4A\r\033[2K%s\n\r\033[2K%s\n\r\033[2K%s\n\r\033[2K%s\n' \
+                        "$header" "$line1" "$line2" "$line3"
+                fi
+                sleep 0.08
+            done
+            wait "$poll_pid" 2>/dev/null || true
+        fi
+
+        if ! mapfile -t lines < "$snapf" 2>/dev/null || [ "${#lines[@]}" -lt 4 ]; then
+            rm -f "$snapf"
+            continue
+        fi
+        rm -f "$snapf"
+
+        backend_snap="${lines[0]-}"
+        runai_snap="${lines[1]-}"
+        backend_blocking="${lines[2]-}"
+        cluster_blocking="${lines[3]-}"
+
+        backend_line="$(_automatic_release_format_line_from_state "Step 1 backend:" "$backend_snap")"
+        if _automatic_backend_gate_ok_from_snap "$backend_snap"; then
+            cluster_line="$(_automatic_release_format_line_from_state "Step 2 runai:  " "$runai_snap")"
+        else
+            cluster_line="Step 2 runai:   [0%] 0/0 ready (helm: waiting for backend)"
+        fi
+
+        backend_pct=0
+        cluster_pct=0
+        if [ -n "$backend_snap" ]; then
+            IFS='|' read -r _b_hs _b_r _b_t _b_np _b_nse <<<"$backend_snap"
+            backend_pct="$(_automatic_release_pct_from_state "$_b_hs" "$_b_r" "$_b_t" "$_b_np" "$_b_nse" 2>/dev/null || echo 0)"
+        fi
+        if _automatic_backend_gate_ok_from_snap "$backend_snap" && [ -n "$runai_snap" ]; then
+            IFS='|' read -r _r_hs _r_r _r_t _r_np _r_nse <<<"$runai_snap"
+            cluster_pct="$(_automatic_release_pct_from_state "$_r_hs" "$_r_r" "$_r_t" "$_r_np" "$_r_nse" 2>/dev/null || echo 0)"
+        fi
+        case "$backend_pct" in ''|*[!0-9]*) backend_pct=0 ;; esac
+        case "$cluster_pct" in ''|*[!0-9]*) cluster_pct=0 ;; esac
+        overall_pct=$(( (backend_pct + cluster_pct) / 2 ))
+        if [ "$overall_pct" -lt 0 ]; then overall_pct=0; fi
+        if [ "$overall_pct" -gt 100 ]; then overall_pct=100; fi
+
+        bar_width=20
+        filled=$(( overall_pct * bar_width / 100 ))
+        [ "$filled" -lt 0 ] && filled=0
+        [ "$filled" -gt "$bar_width" ] && filled="$bar_width"
+        empty=$(( bar_width - filled ))
+        bar=""
+        i=0
+        while [ "$i" -lt "$filled" ]; do bar+='▰'; i=$((i+1)); done
+        i=0
+        while [ "$i" -lt "$empty" ]; do bar+='▱'; i=$((i+1)); done
+
+        cached_pct=$overall_pct
+        cached_bar="$bar"
+        cached_line1="  ${backend_line:-Step 1 backend: [0%] starting}"
+        cached_line2="  ${cluster_line:-Step 2 runai:   [0%] pending}"
+        if [ -n "$backend_blocking" ] && [ -n "$cluster_blocking" ]; then
+            cached_line3="  blocking — backend: ${backend_blocking}; runai: ${cluster_blocking}"
+        elif [ -n "$backend_blocking" ]; then
+            cached_line3="  blocking — backend: ${backend_blocking}"
+        elif [ -n "$cluster_blocking" ]; then
+            cached_line3="  blocking — runai: ${cluster_blocking}"
+        else
+            cached_line3="  blocking — none"
+        fi
+
+        if [ "$use_inplace" != true ] || [ ! -t 1 ]; then
+            now_ts="$(date +%s 2>/dev/null || echo "$started_ts")"
+            elapsed_s=$(( now_ts - started_ts ))
+            [ "$elapsed_s" -lt 0 ] && elapsed_s=0
+            elapsed_h=$(( elapsed_s / 3600 ))
+            elapsed_m=$(( (elapsed_s % 3600) / 60 ))
+            if [ "$elapsed_h" -gt 0 ]; then
+                elapsed_disp="$(printf '%02dh%02dm' "$elapsed_h" "$elapsed_m")"
+            else
+                elapsed_disp="$(printf '%02dm' "$elapsed_m")"
+            fi
+            spin="${spinner_chars[$spinner_idx]}"
+            spinner_idx=$(( (spinner_idx + 1) % ${#spinner_chars[@]} ))
+            C_CYAN=$'\033[36m'
+            C_GREEN=$'\033[32;1m'
+            C_DIM=$'\033[2m'
+            C_RESET=$'\033[0m'
+            header="$(printf '  %s%s%s installing Run:ai control plane — %s %s%3d%%%s   %selapsed %s%s' \
+                "$C_CYAN" "$spin" "$C_RESET" \
+                "$cached_bar" \
+                "$C_GREEN" "$cached_pct" "$C_RESET" \
+                "$C_DIM" "$elapsed_disp" "$C_RESET")"
+            line1="$cached_line1"
+            line2="$cached_line2"
+            line3="$cached_line3"
+            if [ -n "$term_cols" ] && [ "$term_cols" -ge 40 ] 2>/dev/null; then
+                header="$(_automatic_monitor_trunc_line "$header" "$((term_cols - 1))")"
+                line1="$(_automatic_monitor_trunc_line "$line1" "$((term_cols - 1))")"
+                line2="$(_automatic_monitor_trunc_line "$line2" "$((term_cols - 1))")"
+                line3="$(_automatic_monitor_trunc_line "$line3" "$((term_cols - 1))")"
+            fi
+            if [ "$first_render" = true ]; then
+                first_render=false
+            else
+                printf '\n'
+            fi
+            printf '%s\n%s\n%s\n%s\n' "$header" "$line1" "$line2" "$line3"
+            sleep 1
+        fi
     done
     echo ""
 }
@@ -1363,7 +2029,7 @@ run_automatic_mode() {
             } >>"$LOG_FILE"
         fi
     else
-        echo -e "\n${BLUE}▶ TLS / ingress check (sanity-check.sh --use-haproxy)${NC}"
+        echo -e "\n${BLUE}▶ TLS / ingress check${NC}"
         # SANITY_TLS_FAST: use minimal external TLS check path + faster teardown (see sanity-check run_tls_tests).
         if ! SANITY_TLS_FAST=1 automatic_run_sanity_check \
             --dns "$AUTO_DNS" \
@@ -1539,7 +2205,7 @@ run_automatic_mode() {
 
     if automatic_has_install_credentials; then
         echo -e "\n${BLUE}▶ Installing Run:ai control plane${NC}"
-        echo -e "  ${BLUE}Two-step install:${NC} ${GREEN}(1) runai-backend${NC} → ${GREEN}(2) runai${NC}. One line below shows ${GREEN}ready/total${NC} pods for each step."
+        echo -e "  ${BLUE}Two-step install:${NC} ${GREEN}(1) runai-backend${NC} → ${GREEN}(2) runai${NC}. The block below shows ${GREEN}overall %${NC}, each step, and ${GREEN}blocking pods${NC} (refreshed in place)."
         local -a chain
         if [ "${RUNAI_AUTOMATIC_ON_OPENSHIFT:-false}" = true ]; then
             # OpenShift: control plane uses global.config.kubernetesDistribution=openshift; no HAProxy; no installer certs by default

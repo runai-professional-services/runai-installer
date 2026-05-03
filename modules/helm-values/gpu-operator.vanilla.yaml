@@ -1,0 +1,50 @@
+# NVIDIA GPU Operator — vanilla Kubernetes (no Bright /cm paths).
+# Same feature toggles as the BCM reference (CDI device plugin, no driver DCGM host stack, MIG single, NFD)
+# without BCM-specific containerd paths. Chart pin is in prerequisites.sh (default v25.10.1).
+#
+# Profile selection: automatic when GPU_OPERATOR_VALUES_PROFILE=auto (default); override with
+#   GPU_OPERATOR_VALUES_PROFILE=vanilla | bcm   or   RUNAI_BCM_CLUSTER=true
+# Optional merge: GPU_OPERATOR_HELM_VALUES_FILE
+
+cdi:
+  default: true
+  enabled: true
+dcgm:
+  enabled: false
+dcgmExporter:
+  enabled: true
+  serviceMonitor:
+    enabled: false
+devicePlugin:
+  enabled: true
+  env:
+    - name: DEVICE_LIST_STRATEGY
+      value: cdi-cri,cdi-annotations,volume-mounts
+driver:
+  enabled: false
+  rdma:
+    enabled: false
+kataManager:
+  enabled: false
+mig:
+  strategy: single
+migManager:
+  enabled: true
+nfd:
+  enabled: true
+sandboxWorkloads:
+  enabled: false
+toolkit:
+  enabled: false
+  env:
+    - name: ACCEPT_NVIDIA_VISIBLE_DEVICES_ENVVAR_WHEN_UNPRIVILEGED
+      value: "false"
+    - name: ACCEPT_NVIDIA_VISIBLE_DEVICES_AS_VOLUME_MOUNTS
+      value: "true"
+    - name: NVIDIA_RUNTIME_SET_AS_DEFAULT
+      value: "true"
+validator:
+  driver:
+    env:
+      - name: DISABLE_DEV_CHAR_SYMLINK_CREATION
+        value: "true"

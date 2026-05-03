@@ -311,6 +311,8 @@ install_runai() {
         fi
 
         # Wait for pods to be ready (recompute each tick: pod count can grow during rollout)
+        # Ordering guarantee: nothing below (OpenID/curl/API/install.sh for namespace runai) runs until
+        # runai-backend Helm is deployed and every backend pod is Ready (same gate as runai_pod_readiness_counts).
         echo -e "${BLUE}Waiting for Run.ai backend pods to be ready...${NC}"
         while true; do
             read -r TOTAL_PODS READY_PODS < <(runai_pod_readiness_counts runai-backend)
@@ -325,6 +327,9 @@ install_runai() {
             fi
             sleep 5
         done
+
+        echo -e "\n${BLUE}▶ Backend is fully up — continuing with control-plane API (auth + curl), then Helm install in namespace ${GREEN}runai${BLUE}.${NC}"
+        echo -e "${YELLOW}  (No cluster-install curl and no runai release until the wait above succeeds.)${NC}"
 
         # Set up environment variables
         export control_plane_domain=$DNS_NAME
@@ -348,8 +353,8 @@ install_runai() {
             exit 1
         fi
 
-        # Get installation string
-        echo -e "${BLUE}Getting installation information...${NC}"
+        # Get installation string (requires backend up + auth; only then Helm for namespace runai)
+        echo -e "${BLUE}Getting installation information (cluster-install-info via API / curl)...${NC}"
         while true; do
             installationStr=$(curl --insecure --silent "https://$control_plane_domain/api/v1/clusters/$uuid/cluster-install-info?version=$cluster_version" \
                 -H 'accept: application/json' \
@@ -436,8 +441,8 @@ install_runai() {
             exit 1
         fi
 
-        # Get installation string
-        echo -e "${BLUE}Getting installation information...${NC}"
+        # Get installation string (cluster-only: assumes backend already exists; same API gate before runai Helm)
+        echo -e "${BLUE}Getting installation information (cluster-install-info via API / curl)...${NC}"
         while true; do
             installationStr=$(curl --insecure --silent "https://$control_plane_domain/api/v1/clusters/$uuid/cluster-install-info?version=$cluster_version" \
                 -H 'accept: application/json' \
@@ -484,8 +489,8 @@ install_runai() {
     echo "$formatted_command" > install.sh
     chmod +x install.sh
 
-    # Execute the installation script silently
-    echo -e "${BLUE}Installing Run.ai cluster components...${NC}"
+    # Execute the installation script silently (Helm release into namespace runai — only after backend + API steps above)
+    echo -e "${BLUE}Installing Run.ai cluster components (namespace runai)...${NC}"
 
     # Log the full command
     echo "Executing installation commands:" >> "$LOG_FILE"

@@ -1,12 +1,19 @@
 #!/bin/bash
 
+# shellcheck source=/dev/null
+. "$(dirname "${BASH_SOURCE[0]}")/gpu-operator-values.sh"
+
 # Function to install Prometheus Stack
 install_prometheus() {
     echo -e "${BLUE}Installing Prometheus Stack...${NC}"
 
-    # Check if Prometheus is already installed
+    # Check if Prometheus is already installed (installer default, or common kube-prometheus-stack elsewhere).
     if kubectl get ns monitoring &> /dev/null && kubectl get svc -n monitoring prometheus-kube-prometheus-prometheus &> /dev/null; then
         echo -e "${BLUE}Prometheus Stack already installed.${NC}"
+        return 0
+    fi
+    if helm list -A 2>/dev/null | grep -qF 'kube-prometheus-stack'; then
+        echo -e "${BLUE}Prometheus Stack already installed (Helm chart kube-prometheus-stack).${NC}"
         return 0
     fi
 
@@ -37,28 +44,56 @@ install_prometheus() {
 }
 
 # Function to install NVIDIA GPU Operator
+# Chart v25.10.1 by default; values file is BCM vs vanilla (see modules/gpu-operator-values.sh).
+#   GPU_OPERATOR_CHART_VERSION          — Helm chart version (default v25.10.1)
+#   GPU_OPERATOR_DEFAULT_VALUES_FILE    — skip auto profile; use this yaml path
+#   GPU_OPERATOR_VALUES_PROFILE         — auto | vanilla | bcm (default auto: detect /cm containerd)
+#   RUNAI_BCM_CLUSTER                     — true / 1 → use bcm values when profile is auto
+#   GPU_OPERATOR_HELM_VALUES_FILE       — optional extra -f merged after the profile file
 install_gpu_operator() {
     echo -e "${BLUE}Installing NVIDIA GPU Operator...${NC}"
 
-    # Check if GPU Operator is already installed
-    if kubectl get ns gpu-operator &> /dev/null; then
-        echo -e "${BLUE}NVIDIA GPU Operator already installed.${NC}"
+    if helm status gpu-operator -n gpu-operator &>/dev/null; then
+        echo -e "${BLUE}NVIDIA GPU Operator already installed (Helm release gpu-operator).${NC}"
         return 0
     fi
 
-    # Install NVIDIA GPU Operator
+    local prereq_dir values_file chart_ver helm_cmd extra_f prof
+    prereq_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    values_file="$(runai_gpu_operator_values_file_for_host "$prereq_dir")"
+    if [ ! -f "$values_file" ]; then
+        echo -e "${RED}❌ GPU Operator values file not found: $values_file${NC}" >&2
+        return 1
+    fi
+    prof="$(runai_gpu_operator_values_profile_label "$values_file")"
+    echo -e "${BLUE}GPU Operator Helm values profile:${NC} ${GREEN}${prof}${NC}  (${values_file})"
+
+    chart_ver="${GPU_OPERATOR_CHART_VERSION:-v25.10.1}"
+
     if ! log_command "helm repo add nvidia https://helm.ngc.nvidia.com/nvidia" "Add NVIDIA Helm repo"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to add NVIDIA helm repo, continuing...${NC}"
         return 1
     fi
 
-    if ! log_command "helm install --wait --generate-name -n gpu-operator --create-namespace nvidia/gpu-operator > /dev/null 2>&1" "Install NVIDIA GPU Operator"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to install NVIDIA GPU operator, continuing...${NC}"
+    if ! log_command "helm repo update nvidia" "Update NVIDIA Helm repo"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to update NVIDIA helm repo, continuing...${NC}"
         return 1
-    else
-        echo -e "${GREEN}✅ NVIDIA GPU Operator installed successfully!${NC}"
     fi
 
+    extra_f=""
+    if [ -n "${GPU_OPERATOR_HELM_VALUES_FILE:-}" ] && [ -f "${GPU_OPERATOR_HELM_VALUES_FILE}" ]; then
+        extra_f=" -f \"${GPU_OPERATOR_HELM_VALUES_FILE}\""
+        echo -e "${BLUE}Applying additional GPU Operator values:${NC} ${GPU_OPERATOR_HELM_VALUES_FILE}"
+    fi
+
+    helm_cmd="helm upgrade --install gpu-operator nvidia/gpu-operator --namespace gpu-operator --create-namespace --version \"${chart_ver}\" --wait --timeout 25m -f \"${values_file}\"${extra_f}"
+
+    if ! log_command "$helm_cmd" "Install NVIDIA GPU Operator (chart ${chart_ver})"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to install NVIDIA GPU operator, continuing...${NC}"
+        return 1
+    fi
+
+    echo -e "${GREEN}✅ NVIDIA GPU Operator installed successfully!${NC}"
     return 0
 }
 

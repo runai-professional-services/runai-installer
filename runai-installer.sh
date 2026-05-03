@@ -4,6 +4,7 @@
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
+CYAN='\033[0;36m'
 RED='\033[0;31m'
 NC='\033[0m' # No Color
 
@@ -91,11 +92,21 @@ get_latest_runai_version() {
     if [ "${RUNAI_ARTIFACT_SOURCE:-jfrog}" = "ngc" ]; then
         latest_version=$(helm search repo runai/control-plane --output json 2>/dev/null | jq -r '[.[] | select(.name == "runai/control-plane")] | first | .version // empty' 2>/dev/null)
     else
-        latest_version=$(helm search repo runai-backend --output json 2>/dev/null | jq -r '[.[] | select(.name == "runai-backend/control-plane")] | first | .version // empty' 2>/dev/null)
+        # JFrog: resolve latest chart semver from the public cp-charts-prod index (explicit chart beats keyword ordering).
+        latest_version=$(helm search repo runai-backend/control-plane --versions --output json 2>/dev/null | jq -r '.[] | select(.name == "runai-backend/control-plane") | .version' 2>/dev/null | sort -V | tail -n 1)
+        if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
+            latest_version=$(helm search repo runai-backend/control-plane --output json 2>/dev/null | jq -r '[.[] | select(.name == "runai-backend/control-plane")] | first | .version // empty' 2>/dev/null)
+        fi
+        if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
+            latest_version=$(helm search repo runai-backend --output json 2>/dev/null | jq -r '.[] | select(.name == "runai-backend/control-plane") | .version' 2>/dev/null | sort -V | tail -n 1)
+        fi
     fi
-    
+
     if [ -z "$latest_version" ] || [ "$latest_version" = "null" ]; then
-        echo -e "${RED}❌ Error: Could not detect latest Run.ai version${NC}"
+        echo -e "${RED}❌ Error: Could not detect latest Run.ai version from Helm.${NC}" >&2
+        if [ "${RUNAI_ARTIFACT_SOURCE:-jfrog}" = "jfrog" ]; then
+            echo -e "${YELLOW}JFrog: ensure repo is reachable: helm repo add runai-backend https://runai.jfrog.io/artifactory/cp-charts-prod && helm repo update && helm search repo runai-backend/control-plane --versions${NC}" >&2
+        fi
         return 1
     fi
     
@@ -136,7 +147,8 @@ show_usage() {
     echo "                         Or export NGC_API_KEY and use: --ngc-api-key \"\$NGC_API_KEY\""
     echo "  --prometheus           Install Prometheus Stack"
     echo "  --gpu-operator         Install NVIDIA GPU Operator"
-    echo "  --training             Install Kubeflow Training Operator"
+    echo "  --training             Install Kubeflow Training Operator (PyTorchJob/TFJob/…; Kustomize standalone overlay)"
+    echo "  --mpi-operator         Install Kubeflow MPI Operator (MPIJob; upstream manifest, default v0.7.0)"
     echo "  --lws                  Install Local Workload Service (LWS)"
     echo "  --install-sc           Install Local Path Provisioner and set as default storage class"
     echo "  --repo-secret FILE     Specify repository secret file location"
@@ -182,7 +194,7 @@ show_usage() {
     echo "  # OpenShift: --automatic detects OCP, uses runai.apps.<baseDomain> and skips HAProxy (per NVIDIA docs)"
     echo ""
     echo "  # Installing with additional components (optional: --nginx / --haproxy to deploy an ingress controller)"
-    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --training --lws --install-sc --repo-secret /root/jfrog"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --mpi-operator --training --lws --install-sc --repo-secret /root/jfrog"
     echo ""
     echo "  # Patching existing Nginx installation (optional; --ip only needed for the patch)"
     echo "  $0 --dns 192.168.0.100.sslip.io --ip 192.168.0.214 --use-nginx --patch-nginx --repo-secret /root/jfrog"
@@ -336,7 +348,7 @@ load_env() {
     echo -e "${BLUE}Latest log symlink: $LOGS_DIR/latest.log${NC}"
 
     # Export common variables
-    export GREEN YELLOW BLUE RED NC
+    export GREEN YELLOW BLUE CYAN RED NC
     export LOGS_DIR LOG_FILE
     export TEMP_DIR="/tmp"
     export RUNAI_INGRESS_CLASS
@@ -371,6 +383,7 @@ load_env() {
     INSTALL_PROMETHEUS=${INSTALL_PROMETHEUS:-false}
     INSTALL_GPU_OPERATOR=${INSTALL_GPU_OPERATOR:-false}
     INSTALL_TRAINING=${INSTALL_TRAINING:-false}
+    INSTALL_MPI_OPERATOR=${INSTALL_MPI_OPERATOR:-false}
     INSTALL_LWS=${INSTALL_LWS:-false}
     INSTALL_STORAGE_CLASS=${INSTALL_STORAGE_CLASS:-false}
     BCM_CONFIG=${BCM_CONFIG:-false}
@@ -566,6 +579,10 @@ while [[ $# -gt 0 ]]; do
             INSTALL_TRAINING=true
             shift
             ;;
+        --mpi-operator)
+            INSTALL_MPI_OPERATOR=true
+            shift
+            ;;
         --lws)
             INSTALL_LWS=true
             shift
@@ -677,11 +694,8 @@ fi
 
 # Handle uninstall if requested (before validation)
 if [ "$UNINSTALL" = true ]; then
-    echo -e "${BLUE}Uninstall mode requested...${NC}"
-    
     # Check if the original uninstall script exists
     if [ -f "./sanity-check/full-runai-delete.sh" ]; then
-        echo -e "${BLUE}Running full Run.ai uninstall script...${NC}"
         if [ "${AUTO_YES:-false}" = true ]; then
             RUNAI_AUTO_YES=true bash ./sanity-check/full-runai-delete.sh --yes
         else
@@ -696,7 +710,24 @@ fi
 
 # Opinionated automatic cluster prep (exits when finished)
 if [ "${AUTOMATIC_MODE:-false}" = true ]; then
-    if [ -n "${NGC_API_KEY:-}" ]; then
+    # Prefer explicit --jfrog / --ngc over incidental env (e.g. NGC_API_KEY in shell while using --jfrog).
+    if [ "${NGC_FLAG_COUNT:-0}" -gt 0 ] && [ "${JFROG_FLAG_COUNT:-0}" -gt 0 ]; then
+        echo -e "${RED}❌ --automatic: use only one of --ngc or --jfrog${NC}" >&2
+        exit 1
+    fi
+    if [ "${JFROG_FLAG_COUNT:-0}" -gt 0 ]; then
+        export RUNAI_ARTIFACT_SOURCE=jfrog
+        if [ -z "${REPO_SECRET:-}" ] || [ ! -f "${REPO_SECRET}" ]; then
+            echo -e "${RED}❌ --jfrog requires --repo-secret FILE (JFrog/registry credentials for install)${NC}" >&2
+            exit 1
+        fi
+    elif [ "${NGC_FLAG_COUNT:-0}" -gt 0 ]; then
+        export RUNAI_ARTIFACT_SOURCE=ngc
+        if [ -z "${NGC_API_KEY:-}" ]; then
+            echo -e "${RED}❌ --ngc requires --ngc-api-key or NGC_API_KEY${NC}" >&2
+            exit 1
+        fi
+    elif [ -n "${NGC_API_KEY:-}" ]; then
         export RUNAI_ARTIFACT_SOURCE=ngc
     elif [ -n "${REPO_SECRET:-}" ] && [ -f "${REPO_SECRET}" ]; then
         export RUNAI_ARTIFACT_SOURCE=jfrog
@@ -830,6 +861,14 @@ if [ "$INSTALL_GPU_OPERATOR" = true ]; then
     fi
 fi
 
+source ./modules/mpi-operator.sh
+if [ "$INSTALL_MPI_OPERATOR" = true ]; then
+    if ! install_mpi_operator; then
+        echo -e "${RED}❌ MPI Operator installation failed${NC}"
+        exit 1
+    fi
+fi
+
 source ./modules/training.sh
 if [ "$INSTALL_TRAINING" = true ]; then
     if ! install_training_operator; then
@@ -951,6 +990,7 @@ fi
     fi
     echo "Install Prometheus: $([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")"
     echo "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"
+    echo "Install MPI Operator: $([ "$INSTALL_MPI_OPERATOR" = true ] && echo "Yes" || echo "No")"
     echo "Install Training Operator: $([ "$INSTALL_TRAINING" = true ] && echo "Yes" || echo "No")"
     echo "Install LWS: $([ "$INSTALL_LWS" = true ] && echo "Yes" || echo "No")"
     echo "Install Storage Class: $([ "$INSTALL_STORAGE_CLASS" = true ] && echo "Yes" || echo "No")"
@@ -985,6 +1025,7 @@ if [ "$INSTALL_ONLY" = true ]; then
     [ "$INSTALL_HAPROXY" = true ] && echo -e "  ${GREEN}✅ HAProxy Kubernetes Ingress${NC}"
     [ "$INSTALL_KNATIVE" = true ] && echo -e "  ${GREEN}✅ Knative Serving${NC}"
     [ "$INSTALL_LWS" = true ] && echo -e "  ${GREEN}✅ LWS${NC}"
+    [ "$INSTALL_MPI_OPERATOR" = true ] && echo -e "  ${GREEN}✅ Kubeflow MPI Operator${NC}"
     [ "$INSTALL_TRAINING" = true ] && echo -e "  ${GREEN}✅ Kubeflow Training Operator${NC}"
     echo
 else

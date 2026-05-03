@@ -26,6 +26,16 @@ uninstall_runai() {
 
     echo -e "${BLUE}Starting Run.ai cleanup...${NC}"
 
+    # Mutating/validating webhooks call runai-operator.runai.svc; if that Service is gone, CR updates fail.
+    echo -e "${BLUE}Removing Run.ai admission webhooks...${NC}"
+    local _wh
+    for _wh in $(kubectl get mutatingwebhookconfiguration -o name 2>/dev/null | grep -Ei 'runai|run\.ai' || true); do
+        kubectl delete "$_wh" --ignore-not-found --wait=false >/dev/null 2>&1 && echo -e "${GREEN}✅ Deleted ${_wh}${NC}" || true
+    done
+    for _wh in $(kubectl get validatingwebhookconfiguration -o name 2>/dev/null | grep -Ei 'runai|run\.ai' || true); do
+        kubectl delete "$_wh" --ignore-not-found --wait=false >/dev/null 2>&1 && echo -e "${GREEN}✅ Deleted ${_wh}${NC}" || true
+    done
+
     # Clean up runaiconfig first
     echo -e "${BLUE}Cleaning up runaiconfig...${NC}"
     if kubectl patch runaiconfigs.run.ai/runai -n runai -p '{"metadata":{"finalizers":[]}}' --type=merge; then
@@ -40,14 +50,55 @@ uninstall_runai() {
         echo -e "${YELLOW}⚠️ No runaiconfig found or already deleted${NC}"
     fi
 
+    # Cluster-scoped RBAC often survives helm uninstall / --no-hooks.
+    delete_runai_cluster_rbac() {
+        echo -e "${BLUE}Removing Run.ai ClusterRoleBindings and ClusterRoles...${NC}"
+        local _rb
+        for _rb in $(kubectl get clusterrolebinding -o name 2>/dev/null | grep -Ei 'runai|run\.ai' || true); do
+            kubectl delete "$_rb" --ignore-not-found --wait=false >/dev/null 2>&1 && echo -e "${GREEN}✅ Deleted ${_rb}${NC}" || true
+        done
+        for _rb in $(kubectl get clusterrole -o name 2>/dev/null | grep -Ei 'runai|run\.ai' || true); do
+            kubectl delete "$_rb" --ignore-not-found --wait=false >/dev/null 2>&1 && echo -e "${GREEN}✅ Deleted ${_rb}${NC}" || true
+        done
+    }
+
     # Function to delete Helm releases
     delete_helm_releases() {
         echo -e "${BLUE}Deleting Helm releases...${NC}"
-        
-        # Check for runai-backend release
-        if helm list -n runai-backend | grep -q "runai-backend"; then
+
+        helm_release_exists() {
+            local release="$1"
+            local namespace="$2"
+            helm list -n "$namespace" -q 2>/dev/null | grep -Fxq "$release"
+        }
+
+        safe_helm_uninstall() {
+            local release="$1"
+            local namespace="$2"
+
+            # Limit waiting time so uninstall does not appear to hang forever.
+            if command -v timeout >/dev/null 2>&1; then
+                if timeout 180s helm uninstall "$release" -n "$namespace" --timeout 120s; then
+                    return 0
+                fi
+            else
+                if helm uninstall "$release" -n "$namespace" --timeout 120s; then
+                    return 0
+                fi
+            fi
+
+            echo -e "${YELLOW}⚠️ Standard uninstall failed/timed out for ${release}; retrying without hooks...${NC}"
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 180s helm uninstall "$release" -n "$namespace" --no-hooks --timeout 120s
+            else
+                helm uninstall "$release" -n "$namespace" --no-hooks --timeout 120s
+            fi
+        }
+
+        # Delete backend release first.
+        if helm_release_exists "runai-backend" "runai-backend"; then
             echo -e "${BLUE}Deleting runai-backend Helm release...${NC}"
-            if helm delete runai-backend -n runai-backend; then
+            if safe_helm_uninstall "runai-backend" "runai-backend"; then
                 echo -e "${GREEN}✅ Successfully deleted runai-backend Helm release${NC}"
             else
                 echo -e "${RED}❌ Failed to delete runai-backend Helm release${NC}"
@@ -55,14 +106,21 @@ uninstall_runai() {
         else
             echo -e "${YELLOW}⚠️ No runai-backend Helm release found${NC}"
         fi
-        
-        # Check for runai release
-        if helm list -n runai | grep -q "runai"; then
-            echo -e "${BLUE}Deleting runai Helm release...${NC}"
-            if helm delete runai-cluster -n runai; then
-                echo -e "${GREEN}✅ Successfully deleted runai Helm release${NC}"
+
+        # Control-plane release name may be "runai" or "runai-cluster" depending on install path.
+        local runai_release=""
+        if helm_release_exists "runai" "runai"; then
+            runai_release="runai"
+        elif helm_release_exists "runai-cluster" "runai"; then
+            runai_release="runai-cluster"
+        fi
+
+        if [ -n "$runai_release" ]; then
+            echo -e "${BLUE}Deleting runai Helm release (${runai_release})...${NC}"
+            if safe_helm_uninstall "$runai_release" "runai"; then
+                echo -e "${GREEN}✅ Successfully deleted runai Helm release (${runai_release})${NC}"
             else
-                echo -e "${RED}❌ Failed to delete runai Helm release${NC}"
+                echo -e "${RED}❌ Failed to delete runai Helm release (${runai_release})${NC}"
             fi
         else
             echo -e "${YELLOW}⚠️ No runai Helm release found${NC}"
@@ -71,6 +129,7 @@ uninstall_runai() {
 
     # Execute Helm cleanup
     delete_helm_releases
+    delete_runai_cluster_rbac
 
     echo -e "${GREEN}✅ Helm cleanup completed${NC}"
     echo -e "${YELLOW}Would you like to continue with full cleanup? [y/N] ${NC}"
@@ -217,12 +276,12 @@ uninstall_runai() {
 
         # Main cleanup process
         echo -e "${BLUE}Starting cleanup in runai namespace...${NC}"
-        for resource in pods secrets jobs statefulsets persistentvolumeclaims deployments replicasets services; do
+        for resource in pods secrets jobs statefulsets persistentvolumeclaims deployments replicasets services roles rolebindings serviceaccounts configmaps; do
             delete_resource $resource runai
         done
 
         echo -e "${BLUE}Starting cleanup in runai-backend namespace...${NC}"
-        for resource in pods secrets jobs statefulsets persistentvolumeclaims deployments replicasets services; do
+        for resource in pods secrets jobs statefulsets persistentvolumeclaims deployments replicasets services roles rolebindings serviceaccounts configmaps; do
             delete_resource $resource runai-backend
         done
 

@@ -13,6 +13,8 @@ automatic_vanilla_install_missing_optional_components() {
     [ "$HAVE_KNATIVE" = false ] && installed_components+=("Knative")
     [ "$HAVE_LWS" = false ] && part1_flags+=(--lws)
     [ "$HAVE_LWS" = false ] && installed_components+=("LWS")
+    [ "$HAVE_MPI" = false ] && part1_flags+=(--mpi-operator)
+    [ "$HAVE_MPI" = false ] && installed_components+=("MPI Operator")
     [ "$HAVE_TRAINING" = false ] && part1_flags+=(--training)
     [ "$HAVE_TRAINING" = false ] && installed_components+=("Training Operator")
 
