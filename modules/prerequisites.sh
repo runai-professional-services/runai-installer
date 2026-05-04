@@ -3,7 +3,9 @@
 # shellcheck source=/dev/null
 . "$(dirname "${BASH_SOURCE[0]}")/gpu-operator-values.sh"
 
-# Function to install Prometheus Stack
+# kube-prometheus-stack (Grafana disabled). Env: KUBE_PROMETHEUS_STACK_SKIP_OPERATOR_CRDS_CHART,
+# PROMETHEUS_OPERATOR_CRDS_CHART_VERSION, KUBE_PROMETHEUS_STACK_CHART_VERSION,
+# KUBE_PROMETHEUS_STACK_FALLBACK_CHART_VERSION (default 58.7.2), KUBE_PROMETHEUS_STACK_DISABLE_OPENAPI_VALIDATION.
 install_prometheus() {
     echo -e "${BLUE}Installing Prometheus Stack...${NC}"
 
@@ -23,23 +25,48 @@ install_prometheus() {
         return 1
     fi
 
-    # If Prometheus Operator CRDs are already in the cluster (leftover, another stack, or failed
-    # partial install), Helm 3/4 server-side apply on CRDs can fail with:
-    #   conflicts with "helm" on .metadata.annotations / .spec.versions
-    # In that case install the release only; existing CRDs are used as-is.
-    local prom_install_cmd="helm upgrade --install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace --set grafana.enabled=false"
+    if ! log_command "helm repo update prometheus-community > /dev/null 2>&1" "Update Prometheus Helm repo"; then
+        echo -e "${YELLOW}⚠️ Warning: Failed to update prometheus-community helm repo, continuing...${NC}"
+    fi
+
+    # prometheus-operator-crds only when no monitoring.coreos.com CRDs exist (otherwise Helm cannot adopt CRDs).
+    local have_mon_crds=false
     if kubectl get crd -o name 2>/dev/null | grep -q 'monitoring\.coreos\.com'; then
-        echo -e "${BLUE}Prometheus Operator CRDs already present — using ${YELLOW}--skip-crds${BLUE} to avoid CRD apply conflicts.${NC}"
-        prom_install_cmd="$prom_install_cmd --skip-crds"
+        have_mon_crds=true
+    fi
+    if [ "$have_mon_crds" = false ] && [ "${KUBE_PROMETHEUS_STACK_SKIP_OPERATOR_CRDS_CHART:-false}" != true ]; then
+        local crds_cmd="helm upgrade --install prometheus-operator-crds prometheus-community/prometheus-operator-crds -n monitoring --create-namespace --wait --timeout 10m"
+        if [ -n "${PROMETHEUS_OPERATOR_CRDS_CHART_VERSION:-}" ]; then
+            crds_cmd="$crds_cmd --version \"${PROMETHEUS_OPERATOR_CRDS_CHART_VERSION}\""
+        fi
+        if ! log_command "$crds_cmd" "Install Prometheus Operator CRDs (prometheus-operator-crds chart)"; then
+            echo -e "${YELLOW}⚠️ prometheus-operator-crds install failed; continuing with kube-prometheus-stack.${NC}" >&2
+        fi
     fi
 
-    if ! log_command "$prom_install_cmd > /dev/null 2>&1" "Install Prometheus Stack"; then
-        echo -e "${YELLOW}⚠️ Warning: Failed to install prometheus stack, continuing...${NC}"
-        return 1
-    else
+    local prom_base="helm upgrade --install prometheus prometheus-community/kube-prometheus-stack -n monitoring --create-namespace --set grafana.enabled=false --wait --timeout 25m"
+    local prom_primary="$prom_base"
+    if [ -n "${KUBE_PROMETHEUS_STACK_CHART_VERSION:-}" ]; then
+        prom_primary="$prom_primary --version \"${KUBE_PROMETHEUS_STACK_CHART_VERSION}\""
+    fi
+    if [ "${KUBE_PROMETHEUS_STACK_DISABLE_OPENAPI_VALIDATION:-false}" = true ]; then
+        prom_primary="$prom_primary --disable-openapi-validation"
+        echo -e "${YELLOW}⚠️ KUBE_PROMETHEUS_STACK_DISABLE_OPENAPI_VALIDATION=true — OpenAPI validation disabled (primary attempt).${NC}" >&2
+    fi
+
+    if log_command "$prom_primary" "Install Prometheus Stack (kube-prometheus-stack, with chart CRDs)"; then
         echo -e "${GREEN}✅ Prometheus Stack installed successfully!${NC}"
+        return 0
     fi
 
+    local fb_ver="${KUBE_PROMETHEUS_STACK_FALLBACK_CHART_VERSION:-58.7.2}"
+    echo -e "${YELLOW}⚠️ Primary kube-prometheus-stack install failed.${NC} Retrying with ${BLUE}--skip-crds${NC} and chart ${BLUE}${fb_ver}${NC} (older API; typical when CRDs pre-exist without Helm labels).${NC}" >&2
+    local prom_fb="$prom_base --skip-crds --version \"${fb_ver}\""
+    if ! log_command "$prom_fb" "Install Prometheus Stack (kube-prometheus-stack, fallback: --skip-crds + chart ${fb_ver})"; then
+        echo -e "${YELLOW}⚠️ Warning: Prometheus stack install failed (primary and fallback).${NC}"
+        return 1
+    fi
+    echo -e "${GREEN}✅ Prometheus Stack installed successfully!${NC} ${YELLOW}(fallback chart ${fb_ver} + --skip-crds)${NC}"
     return 0
 }
 

@@ -368,31 +368,43 @@ EOF
         fi
     fi
 
-    # Install NVIDIA GPU Operator if requested
+    # Install NVIDIA GPU Operator if requested (same chart pin + values as runai-installer modules/prerequisites.sh)
     if [ "$INSTALL_GPU_OPERATOR" = true ]; then
         echo "Installing NVIDIA GPU Operator..."
-        
-        # Check if GPU Operator is already installed
-        if kubectl get ns gpu-operator &> /dev/null; then
-            echo "✅ NVIDIA GPU Operator already installed."
+        _K8_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+        # shellcheck source=/dev/null
+        . "${_K8_ROOT}/modules/gpu-operator-values.sh"
+        _GPU_VALUES="$(runai_gpu_operator_values_file_for_host "${_K8_ROOT}/modules")"
+        _GPU_CHART_VER="${GPU_OPERATOR_CHART_VERSION:-v25.10.1}"
+        echo "  GPU Operator values profile: $(runai_gpu_operator_values_profile_label "$_GPU_VALUES") ($_GPU_VALUES)"
+
+        if helm status gpu-operator -n gpu-operator &>/dev/null; then
+            echo "✅ NVIDIA GPU Operator already installed (Helm release gpu-operator)."
+        elif [ ! -f "$_GPU_VALUES" ]; then
+            echo "⚠️ Warning: GPU Operator values missing: $_GPU_VALUES — skipping GPU Operator."
         else
-            # Add helm repo
             if ! helm repo add nvidia https://helm.ngc.nvidia.com/nvidia > /dev/null 2>&1; then
                 echo "⚠️ Warning: Failed to add NVIDIA helm repo, continuing..."
             fi
-
-            # Update helm repos
-            if ! helm repo update > /dev/null 2>&1; then
-                echo "⚠️ Warning: Failed to update helm repos, continuing..."
+            if ! helm repo update nvidia > /dev/null 2>&1; then
+                echo "⚠️ Warning: Failed to update NVIDIA helm repo, continuing..."
             fi
-
-            # Install NVIDIA GPU Operator
-            if ! helm install --wait --generate-name \
-                -n gpu-operator --create-namespace \
-                nvidia/gpu-operator > /dev/null 2>&1; then
+            _gpu_helm_ok=false
+            if [ -n "${GPU_OPERATOR_HELM_VALUES_FILE:-}" ] && [ -f "${GPU_OPERATOR_HELM_VALUES_FILE}" ]; then
+                helm upgrade --install gpu-operator nvidia/gpu-operator \
+                    --namespace gpu-operator --create-namespace \
+                    --version "${_GPU_CHART_VER}" --wait --timeout 25m \
+                    -f "${_GPU_VALUES}" -f "${GPU_OPERATOR_HELM_VALUES_FILE}" > /dev/null 2>&1 && _gpu_helm_ok=true
+            else
+                helm upgrade --install gpu-operator nvidia/gpu-operator \
+                    --namespace gpu-operator --create-namespace \
+                    --version "${_GPU_CHART_VER}" --wait --timeout 25m \
+                    -f "${_GPU_VALUES}" > /dev/null 2>&1 && _gpu_helm_ok=true
+            fi
+            if [ "$_gpu_helm_ok" != true ]; then
                 echo "⚠️ Warning: Failed to install NVIDIA GPU operator, continuing..."
             else
-                echo "✅ NVIDIA GPU Operator installed successfully!"
+                echo "✅ NVIDIA GPU Operator installed successfully! (chart ${_GPU_CHART_VER})"
             fi
         fi
     fi

@@ -147,6 +147,8 @@ show_usage() {
     echo "                         Or export NGC_API_KEY and use: --ngc-api-key \"\$NGC_API_KEY\""
     echo "  --prometheus           Install Prometheus Stack"
     echo "  --gpu-operator         Install NVIDIA GPU Operator"
+    echo "  --nim-operator         Install NVIDIA NIM Operator (Helm: nvidia/k8s-nim-operator; release name defaults to k8s-nim-operator)"
+    echo "  --dynamo                 Install NVIDIA AI Dynamo platform (Helm OCI on nvcr.io; requires NGC_API_KEY or --ngc-key for pull). See ai-dynamo docs/kubernetes."
     echo "  --training             Install Kubeflow Training Operator (PyTorchJob/TFJob/…; Kustomize standalone overlay)"
     echo "  --mpi-operator         Install Kubeflow MPI Operator (MPIJob; upstream manifest, default v0.7.0)"
     echo "  --lws                  Install Local Workload Service (LWS)"
@@ -159,7 +161,8 @@ show_usage() {
     echo "  --registry-secret FILE Registry secret YAML file to apply (optional in --air-gapped mode)"
     echo "  --skip-upload          Skip image uploads when images are already in registry (air-gapped mode)"
     echo "  --subdomain            Enable subdomain support with wildcard ingress"
-    echo "  --install-only         Install prerequisites only (nginx, knative, lws, storage-class) without Run.ai"
+    echo "  --install-only         Install prerequisites only (nginx, knative, lws, dynamo, storage-class) without Run.ai"
+    echo "  --runai-only           Install Run:ai only (skip BCM, ingress, Prometheus, GPU/NIM/Dynamo/MPI/training/LWS, StorageClass, Knative, internal DNS). With --automatic: prep stack as usual, final install omits prereqs (use --use-haproxy/--use-nginx, not --haproxy/--nginx, for ingress class)."
     echo "  --automatic            Prep cluster, then full Run:ai; supports --dns (override sslip), --cert/--key/--cacert; requires --ngc-api-key (NGC) or --repo-secret (JFrog)"
     echo "  --automatic-chain      Legacy alias; same credential requirements as --automatic"
     echo "  --automatic-stop-after PHASE  Stop after: helm|nodes|prereqs|tests|hardware|haproxy|certs|tls|storage"
@@ -194,7 +197,9 @@ show_usage() {
     echo "  # OpenShift: --automatic detects OCP, uses runai.apps.<baseDomain> and skips HAProxy (per NVIDIA docs)"
     echo ""
     echo "  # Installing with additional components (optional: --nginx / --haproxy to deploy an ingress controller)"
-    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --mpi-operator --training --lws --install-sc --repo-secret /root/jfrog"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --nim-operator --mpi-operator --training --lws --install-sc --repo-secret /root/jfrog"
+    echo "  # Same with NVIDIA AI Dynamo (OCI chart on nvcr.io — pass NGC key even when Run:ai uses JFrog):"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --nim-operator --dynamo --mpi-operator --training --lws --install-sc --repo-secret /root/jfrog --ngc-key \"\$NGC_API_KEY\""
     echo ""
     echo "  # Patching existing Nginx installation (optional; --ip only needed for the patch)"
     echo "  $0 --dns 192.168.0.100.sslip.io --ip 192.168.0.214 --use-nginx --patch-nginx --repo-secret /root/jfrog"
@@ -218,9 +223,31 @@ show_usage() {
 
 # Function to validate required parameters
 validate_params() {
+    if [ "${RUNAI_ONLY:-false}" = true ] && [ "${INSTALL_ONLY:-false}" = true ]; then
+        echo -e "${RED}Error: --runai-only cannot be combined with --install-only${NC}" >&2
+        show_usage
+    fi
+
     # Skip validation for uninstall mode or install-only mode
     if [ "$UNINSTALL" = true ] || [ "$INSTALL_ONLY" = true ]; then
         return 0
+    fi
+
+    if [ "${RUNAI_ONLY:-false}" = true ]; then
+        if [ "${AIR_GAPPED_MODE:-false}" = true ]; then
+            echo -e "${RED}Error: --runai-only is not supported with --air-gapped (air-gapped flow bundles prerequisites)${NC}" >&2
+            show_usage
+        fi
+        if [ "${INSTALL_KNATIVE:-false}" = true ] || [ "${INSTALL_NGINX:-false}" = true ] \
+            || [ "${PATCH_NGINX:-false}" = true ] || [ "${INSTALL_HAPROXY:-false}" = true ] \
+            || [ "${PATCH_HAPROXY:-false}" = true ] || [ "${INSTALL_PROMETHEUS:-false}" = true ] \
+            || [ "${INSTALL_GPU_OPERATOR:-false}" = true ] || [ "${INSTALL_NIM_OPERATOR:-false}" = true ] \
+            || [ "${INSTALL_DYNAMO:-false}" = true ] || [ "${INSTALL_TRAINING:-false}" = true ] || [ "${INSTALL_MPI_OPERATOR:-false}" = true ] \
+            || [ "${INSTALL_LWS:-false}" = true ] || [ "${INSTALL_STORAGE_CLASS:-false}" = true ] \
+            || [ "${BCM_CONFIG:-false}" = true ] || [ "${INTERNAL_DNS:-false}" = true ]; then
+            echo -e "${RED}Error: --runai-only skips prerequisite installers; remove --nginx/--haproxy/--prometheus/--gpu-operator/--nim-operator/--dynamo/--training/--mpi-operator/--lws/--install-sc/--knative/--BCM/--internal-dns (and patch flags).${NC}" >&2
+            show_usage
+        fi
     fi
     
     # OpenShift: global.domain=runai.apps.<base> per Run:ai OCP install — optional --dns if the cluster is reachable.
@@ -382,6 +409,8 @@ load_env() {
     RUNAI_INGRESS_CLASS=${RUNAI_INGRESS_CLASS:-}
     INSTALL_PROMETHEUS=${INSTALL_PROMETHEUS:-false}
     INSTALL_GPU_OPERATOR=${INSTALL_GPU_OPERATOR:-false}
+    INSTALL_NIM_OPERATOR=${INSTALL_NIM_OPERATOR:-false}
+    INSTALL_DYNAMO=${INSTALL_DYNAMO:-false}
     INSTALL_TRAINING=${INSTALL_TRAINING:-false}
     INSTALL_MPI_OPERATOR=${INSTALL_MPI_OPERATOR:-false}
     INSTALL_LWS=${INSTALL_LWS:-false}
@@ -391,6 +420,7 @@ load_env() {
     SKIP_UPLOAD=${SKIP_UPLOAD:-false}
     SUBDOMAIN_SUPPORT=${SUBDOMAIN_SUPPORT:-false}
     INSTALL_ONLY=${INSTALL_ONLY:-false}
+    RUNAI_ONLY=${RUNAI_ONLY:-false}
     AIR_GAPPED_FILE=${AIR_GAPPED_FILE:-}
     LABEL_NODES=${LABEL_NODES:-}
     AUTOMATIC_MODE=${AUTOMATIC_MODE:-false}
@@ -575,6 +605,14 @@ while [[ $# -gt 0 ]]; do
             INSTALL_GPU_OPERATOR=true
             shift
             ;;
+        --nim-operator)
+            INSTALL_NIM_OPERATOR=true
+            shift
+            ;;
+        --dynamo)
+            INSTALL_DYNAMO=true
+            shift
+            ;;
         --training)
             INSTALL_TRAINING=true
             shift
@@ -627,6 +665,10 @@ while [[ $# -gt 0 ]]; do
             INSTALL_ONLY=true
             shift
             ;;
+        --runai-only)
+            RUNAI_ONLY=true
+            shift
+            ;;
         --automatic)
             AUTOMATIC_MODE=true
             shift
@@ -677,6 +719,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Incompatible mode pairs (before load_env so unset vars still default safely below)
 # Load environment
 load_env
 
@@ -757,6 +800,10 @@ fi
 # Validate parameters (only if not uninstalling)
 validate_params
 
+if [ "${RUNAI_ONLY:-false}" = true ]; then
+    echo -e "${BLUE}--runai-only:${NC} skipping prerequisite installers (BCM, DNS patch, ingress, Prometheus, GPU/NIM/Dynamo/MPI/training/LWS, StorageClass, Knative).${NC}"
+fi
+
 # Create namespaces first (skip if install-only mode)
 if [ "$INSTALL_ONLY" != true ]; then
     echo -e "${BLUE}Creating namespaces...${NC}"
@@ -780,124 +827,143 @@ if [ "$AIR_GAPPED_MODE" != true ] && [ "$INSTALL_ONLY" != true ]; then
     fi
 fi
 
-# Configure BCM early if requested (skip if in air-gapped mode - air-gapped handles its own BCM)
-if [ "$BCM_CONFIG" = true ] && [ "$AIR_GAPPED_MODE" != true ]; then
-    echo -e "${BLUE}BCM configuration requested...${NC}"
-    
-    if [ ! -f "./modules/bcm.sh" ]; then
-        echo -e "${RED}❌ Error: BCM module not found at ./modules/bcm.sh${NC}"
-        exit 1
+# Configure BCM / ingress / optional stack (skipped entirely with --runai-only)
+if [ "${RUNAI_ONLY:-false}" != true ]; then
+    # Configure BCM early if requested (skip if in air-gapped mode - air-gapped handles its own BCM)
+    if [ "$BCM_CONFIG" = true ] && [ "$AIR_GAPPED_MODE" != true ]; then
+        echo -e "${BLUE}BCM configuration requested...${NC}"
+
+        if [ ! -f "./modules/bcm.sh" ]; then
+            echo -e "${RED}❌ Error: BCM module not found at ./modules/bcm.sh${NC}"
+            exit 1
+        fi
+
+        # Ensure required variables are set
+        if [ -z "$DNS_NAME" ]; then
+            echo -e "${RED}❌ Error: DNS_NAME is required for BCM configuration${NC}"
+            exit 1
+        fi
+
+        # Ensure TEMP_DIR is set
+        if [ -z "$TEMP_DIR" ]; then
+            TEMP_DIR="/tmp"
+        fi
+
+        # Source and execute BCM module
+        echo -e "${BLUE}Loading BCM module...${NC}"
+        source ./modules/bcm.sh
+        echo -e "${BLUE}BCM module loaded successfully${NC}"
+
+        echo -e "${BLUE}Starting BCM configuration...${NC}"
+        if configure_bcm; then
+            echo -e "${GREEN}✅ Bright Cluster Manager configuration completed successfully${NC}"
+        else
+            echo -e "${RED}❌ Bright Cluster Manager configuration failed${NC}"
+            echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
+            exit 1
+        fi
     fi
 
-    # Ensure required variables are set
-    if [ -z "$DNS_NAME" ]; then
-        echo -e "${RED}❌ Error: DNS_NAME is required for BCM configuration${NC}"
-        exit 1
+    source ./modules/dns.sh
+    if [ "$INTERNAL_DNS" = true ]; then
+        patch_coredns
     fi
 
-    # Ensure TEMP_DIR is set
-    if [ -z "$TEMP_DIR" ]; then
-        TEMP_DIR="/tmp"
+    source ./modules/nginx.sh
+    if [ "$INSTALL_NGINX" = true ]; then
+        if ! install_nginx; then
+            echo -e "${RED}❌ Nginx installation failed${NC}"
+            exit 1
+        fi
+    elif [ "$PATCH_NGINX" = true ]; then
+        if ! patch_nginx_service; then
+            echo -e "${RED}❌ Nginx patch failed${NC}"
+            exit 1
+        fi
     fi
 
-    # Source and execute BCM module
-    echo -e "${BLUE}Loading BCM module...${NC}"
-    source ./modules/bcm.sh
-    echo -e "${BLUE}BCM module loaded successfully${NC}"
-    
-    echo -e "${BLUE}Starting BCM configuration...${NC}"
-    if configure_bcm; then
-        echo -e "${GREEN}✅ Bright Cluster Manager configuration completed successfully${NC}"
-    else
-        echo -e "${RED}❌ Bright Cluster Manager configuration failed${NC}"
-        echo -e "${YELLOW}Please check the logs at $LOG_FILE for details${NC}"
-        exit 1
+    source ./modules/haproxy.sh
+    if [ "$INSTALL_HAPROXY" = true ]; then
+        if ! install_haproxy; then
+            echo -e "${RED}❌ HAProxy installation failed${NC}"
+            exit 1
+        fi
+    elif [ "$PATCH_HAPROXY" = true ]; then
+        if ! patch_haproxy_service; then
+            echo -e "${RED}❌ HAProxy patch failed${NC}"
+            exit 1
+        fi
     fi
-fi
 
-source ./modules/dns.sh
-if [ "$INTERNAL_DNS" = true ]; then
-    patch_coredns
-fi
+    source ./modules/prerequisites.sh
+    if [ "$INSTALL_PROMETHEUS" = true ]; then
+        if ! install_prometheus; then
+            echo -e "${RED}❌ Prometheus installation failed${NC}"
+            exit 1
+        fi
+    fi
 
-source ./modules/nginx.sh
-if [ "$INSTALL_NGINX" = true ]; then
-    if ! install_nginx; then
-        echo -e "${RED}❌ Nginx installation failed${NC}"
-        exit 1
+    if [ "$INSTALL_GPU_OPERATOR" = true ]; then
+        if ! install_gpu_operator; then
+            echo -e "${RED}❌ GPU Operator installation failed${NC}"
+            exit 1
+        fi
     fi
-elif [ "$PATCH_NGINX" = true ]; then
-    if ! patch_nginx_service; then
-        echo -e "${RED}❌ Nginx patch failed${NC}"
-        exit 1
-    fi
-fi
 
-source ./modules/haproxy.sh
-if [ "$INSTALL_HAPROXY" = true ]; then
-    if ! install_haproxy; then
-        echo -e "${RED}❌ HAProxy installation failed${NC}"
-        exit 1
+    source ./modules/nim-operator.sh
+    if [ "$INSTALL_NIM_OPERATOR" = true ]; then
+        if ! install_nim_operator; then
+            echo -e "${RED}❌ NIM Operator installation failed${NC}"
+            exit 1
+        fi
     fi
-elif [ "$PATCH_HAPROXY" = true ]; then
-    if ! patch_haproxy_service; then
-        echo -e "${RED}❌ HAProxy patch failed${NC}"
-        exit 1
-    fi
-fi
 
-source ./modules/prerequisites.sh
-if [ "$INSTALL_PROMETHEUS" = true ]; then
-    if ! install_prometheus; then
-        echo -e "${RED}❌ Prometheus installation failed${NC}"
-        exit 1
+    source ./modules/dynamo.sh
+    if [ "$INSTALL_DYNAMO" = true ]; then
+        if ! install_dynamo; then
+            echo -e "${RED}❌ NVIDIA AI Dynamo installation failed${NC}"
+            exit 1
+        fi
     fi
-fi
 
-if [ "$INSTALL_GPU_OPERATOR" = true ]; then
-    if ! install_gpu_operator; then
-        echo -e "${RED}❌ GPU Operator installation failed${NC}"
-        exit 1
+    source ./modules/mpi-operator.sh
+    if [ "$INSTALL_MPI_OPERATOR" = true ]; then
+        if ! install_mpi_operator; then
+            echo -e "${RED}❌ MPI Operator installation failed${NC}"
+            exit 1
+        fi
     fi
-fi
 
-source ./modules/mpi-operator.sh
-if [ "$INSTALL_MPI_OPERATOR" = true ]; then
-    if ! install_mpi_operator; then
-        echo -e "${RED}❌ MPI Operator installation failed${NC}"
-        exit 1
+    source ./modules/training.sh
+    if [ "$INSTALL_TRAINING" = true ]; then
+        if ! install_training_operator; then
+            echo -e "${RED}❌ Training Operator installation failed${NC}"
+            exit 1
+        fi
     fi
-fi
 
-source ./modules/training.sh
-if [ "$INSTALL_TRAINING" = true ]; then
-    if ! install_training_operator; then
-        echo -e "${RED}❌ Training Operator installation failed${NC}"
-        exit 1
+    source ./modules/lws.sh
+    if [ "$INSTALL_LWS" = true ]; then
+        if ! install_lws; then
+            echo -e "${RED}❌ LWS installation failed${NC}"
+            exit 1
+        fi
     fi
-fi
 
-source ./modules/lws.sh
-if [ "$INSTALL_LWS" = true ]; then
-    if ! install_lws; then
-        echo -e "${RED}❌ LWS installation failed${NC}"
-        exit 1
+    source ./modules/storage-class.sh
+    if [ "$INSTALL_STORAGE_CLASS" = true ]; then
+        if ! install_storage_class; then
+            echo -e "${RED}❌ StorageClass installation failed${NC}"
+            exit 1
+        fi
     fi
-fi
 
-source ./modules/storage-class.sh
-if [ "$INSTALL_STORAGE_CLASS" = true ]; then
-    if ! install_storage_class; then
-        echo -e "${RED}❌ StorageClass installation failed${NC}"
-        exit 1
-    fi
-fi
-
-source ./modules/knative.sh
-if [ "$INSTALL_KNATIVE" = true ]; then
-    if ! install_knative; then
-        echo -e "${RED}❌ Knative installation failed${NC}"
-        exit 1
+    source ./modules/knative.sh
+    if [ "$INSTALL_KNATIVE" = true ]; then
+        if ! install_knative; then
+            echo -e "${RED}❌ Knative installation failed${NC}"
+            exit 1
+        fi
     fi
 fi
 
@@ -988,8 +1054,11 @@ fi
     else
         echo "Control-plane ingress class (--use-haproxy / --use-nginx): ${RUNAI_INGRESS_CLASS:-not set}"
     fi
+    echo "Run:ai only (skip prereq installers): $([ "${RUNAI_ONLY:-false}" = true ] && echo "Yes" || echo "No")"
     echo "Install Prometheus: $([ "$INSTALL_PROMETHEUS" = true ] && echo "Yes" || echo "No")"
     echo "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"
+    echo "Install NIM Operator: $([ "$INSTALL_NIM_OPERATOR" = true ] && echo "Yes" || echo "No")"
+    echo "Install NVIDIA AI Dynamo: $([ "$INSTALL_DYNAMO" = true ] && echo "Yes" || echo "No")"
     echo "Install MPI Operator: $([ "$INSTALL_MPI_OPERATOR" = true ] && echo "Yes" || echo "No")"
     echo "Install Training Operator: $([ "$INSTALL_TRAINING" = true ] && echo "Yes" || echo "No")"
     echo "Install LWS: $([ "$INSTALL_LWS" = true ] && echo "Yes" || echo "No")"
@@ -1027,6 +1096,8 @@ if [ "$INSTALL_ONLY" = true ]; then
     [ "$INSTALL_LWS" = true ] && echo -e "  ${GREEN}✅ LWS${NC}"
     [ "$INSTALL_MPI_OPERATOR" = true ] && echo -e "  ${GREEN}✅ Kubeflow MPI Operator${NC}"
     [ "$INSTALL_TRAINING" = true ] && echo -e "  ${GREEN}✅ Kubeflow Training Operator${NC}"
+    [ "$INSTALL_NIM_OPERATOR" = true ] && echo -e "  ${GREEN}✅ NVIDIA NIM Operator${NC}"
+    [ "$INSTALL_DYNAMO" = true ] && echo -e "  ${GREEN}✅ NVIDIA AI Dynamo platform${NC}"
     echo
 else
     # Full Run.ai installation message

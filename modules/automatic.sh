@@ -5,7 +5,7 @@
 #   On OpenShift: no Helm prereq stack; no local-path; no HAProxy/Nginx; no route/ingress/TLS preflight; no auto certs; DNS = runai.apps.<base>.
 #   helm       — Helm CLI (get_helm.sh)
 #   nodes      — worker IP + <IP>.sslip.io (or OpenShift: runai.apps.<baseDomain>)
-#   prereqs    — optional Prometheus / GPU Operator / Knative / LWS / Training (Helm --install-only)
+#   prereqs    — optional Prometheus / GPU Operator / Knative / LWS / Training / NIM (Helm --install-only); Dynamo is manual --dynamo
 #   tests      — preflight: (non-OCP) NGC (if NGC) + hardware / disk / storage; (OpenShift) NGC (if NGC) + StorageClass / PVC; no hardware/disk
 #   haproxy    — HAProxy Ingress install/patch + externalIP verify
 #   certs      — TLS files + secrets (modules/certificates.sh)
@@ -454,8 +454,9 @@ automatic_print_worker_capacity_one_line() {
         return 0
     fi
 
-    local nodes_json workers_json cpu_w mem_w_gib gpu_w
+    local nodes_json workers_json capacity_json cpu_w mem_w_gib gpu_w
     local min_cpu=24 min_mem_gib=24 hw_status hw_color
+    local cap_lbl worker_n total_n
     nodes_json="$(kubectl get nodes -o json 2>/dev/null || true)"
     if [ -z "$nodes_json" ]; then
         return 0
@@ -466,9 +467,24 @@ automatic_print_worker_capacity_one_line() {
         .metadata.labels["node-role.kubernetes.io/master"] == null
     )]' 2>/dev/null || echo "[]")"
 
-    cpu_w="$(printf '%s' "$workers_json" | jq -r '[.[].status.capacity.cpu | tonumber] | add // 0' 2>/dev/null || echo "0")"
-    mem_w_gib="$(printf '%s' "$workers_json" | jq -r '[.[].status.capacity.memory | sub("Ki$";"") | tonumber] | add // 0' 2>/dev/null | awk '{printf "%.0f", $1/1024/1024}')"
-    gpu_w="$(printf '%s' "$workers_json" | jq -r '[.[].status.capacity["nvidia.com/gpu"] | (tonumber? // 0)] | add // 0' 2>/dev/null || echo "0")"
+    worker_n="$(printf '%s' "$workers_json" | jq 'length' 2>/dev/null || echo 0)"
+    total_n="$(printf '%s' "$nodes_json" | jq '.items | length' 2>/dev/null || echo 0)"
+    case "$worker_n" in ''|*[!0-9]*) worker_n=0 ;; esac
+    case "$total_n" in ''|*[!0-9]*) total_n=0 ;; esac
+
+    # Single-node (or all-in-one) clusters often label every node as control-plane — then "workers" is 0
+    # but capacity exists. Sum all nodes for the min-CPU/RAM hint in that case.
+    if [ "$worker_n" -eq 0 ] && [ "$total_n" -ge 1 ]; then
+        capacity_json="$(printf '%s' "$nodes_json" | jq '[.items[]]' 2>/dev/null || echo "[]")"
+        cap_lbl="Workload capacity (all ${total_n} node(s); no dedicated worker role)"
+    else
+        capacity_json="$workers_json"
+        cap_lbl="Total Workers"
+    fi
+
+    cpu_w="$(printf '%s' "$capacity_json" | jq -r '[.[].status.capacity.cpu | tonumber] | add // 0' 2>/dev/null || echo "0")"
+    mem_w_gib="$(printf '%s' "$capacity_json" | jq -r '[.[].status.capacity.memory | sub("Ki$";"") | tonumber] | add // 0' 2>/dev/null | awk '{printf "%.0f", $1/1024/1024}')"
+    gpu_w="$(printf '%s' "$capacity_json" | jq -r '[.[].status.capacity["nvidia.com/gpu"] | (tonumber? // 0)] | add // 0' 2>/dev/null || echo "0")"
 
     [[ "$cpu_w" =~ ^[0-9]+$ ]] || cpu_w=0
     [[ "$mem_w_gib" =~ ^[0-9]+$ ]] || mem_w_gib=0
@@ -482,7 +498,7 @@ automatic_print_worker_capacity_one_line() {
         hw_color="${RED}"
     fi
 
-    echo -e "${CYAN}Total Workers:${NC} ${cpu_w} CPU, ~${mem_w_gib} GiB RAM, ${gpu_w} GPU — ${hw_color}${hw_status}${NC} ${YELLOW}(min ${min_cpu} CPU / ${min_mem_gib} GiB RAM)${NC}" >&2
+    echo -e "${CYAN}${cap_lbl}:${NC} ${cpu_w} CPU, ~${mem_w_gib} GiB RAM, ${gpu_w} GPU — ${hw_color}${hw_status}${NC} ${YELLOW}(min ${min_cpu} CPU / ${min_mem_gib} GiB RAM)${NC}" >&2
 }
 
 automatic_print_node_inventory() {
@@ -765,6 +781,23 @@ automatic_probe_stack() {
         kubectl get ns -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' 2>/dev/null | grep -qE '^(training-operator|kubeflow)$' && HAVE_TRAINING=true
     fi
 
+    HAVE_NIM=false
+    if helm status k8s-nim-operator -n nim-operator &>/dev/null \
+        || helm status nim-operator -n nim-operator &>/dev/null; then
+        HAVE_NIM=true
+    fi
+    if [ "$HAVE_NIM" = false ] && kubectl get ns nim-operator &>/dev/null; then
+        kubectl get pods -n nim-operator --no-headers 2>/dev/null | grep -qiE 'nim-operator|k8s-nim' && HAVE_NIM=true
+    fi
+
+    HAVE_DYNAMO=false
+    if helm status dynamo-platform -n dynamo-system &>/dev/null; then
+        HAVE_DYNAMO=true
+    fi
+    if [ "$HAVE_DYNAMO" = false ] && kubectl get ns dynamo-system &>/dev/null; then
+        kubectl get pods -n dynamo-system --no-headers 2>/dev/null | grep -qiE 'dynamo|grove' && HAVE_DYNAMO=true
+    fi
+
     if ! echo "$HELM_RELEASES" | grep -qE 'nginx|ingress-nginx' && ! kubectl get pods -A 2>/dev/null | grep -q 'ingress-nginx'; then
         HAVE_NGINX=false
     fi
@@ -790,6 +823,8 @@ automatic_probe_stack() {
         AUTOMATIC_CHART_PROMETHEUS=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.chart | test("kube-prometheus-stack")) | .chart' 2>/dev/null | head -1)
         AUTOMATIC_CHART_MPI=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.chart | test("mpi-operator")) | .chart' 2>/dev/null | head -1)
         AUTOMATIC_CHART_TRAINING=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select((.name == "training-operator" or .name == "kubeflow-training") or (.chart | test("training-operator"))) | .chart' 2>/dev/null | head -1)
+        AUTOMATIC_CHART_NIM=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select((.name == "k8s-nim-operator" or .name == "nim-operator") or (.chart | test("k8s-nim-operator"))) | .chart' 2>/dev/null | head -1)
+        AUTOMATIC_CHART_DYNAMO=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.name == "dynamo-platform" or (.chart | test("dynamo-platform"))) | .chart' 2>/dev/null | head -1)
     fi
     AUTOMATIC_KNATIVE_SERVING_SPEC_VERSION=$(kubectl get knativeserving knative-serving -n knative-serving -o jsonpath='{.spec.version}' 2>/dev/null || true)
 }
@@ -826,6 +861,10 @@ automatic_print_installation_plan_will_do() {
     fi
     if [ "$HAVE_TRAINING" = false ]; then
         echo "  • Install Kubeflow Training Operator."
+        any=true
+    fi
+    if [ "$HAVE_NIM" = false ]; then
+        echo "  • Install NVIDIA NIM Operator (Helm chart nvidia/k8s-nim-operator; GPU Operator should already be present)."
         any=true
     fi
     if [ "$HAVE_HAPROXY" = false ]; then
@@ -941,6 +980,26 @@ automatic_print_component_status_brief() {
         echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
     else
         echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install if missing)"
+    fi
+
+    printf -v lbl "$fmt" "NVIDIA NIM Operator"
+    if [ "$HAVE_NIM" = true ]; then
+        detail=""
+        [ -n "${AUTOMATIC_CHART_NIM:-}" ] && detail="  (${AUTOMATIC_CHART_NIM})"
+        [ -z "$detail" ] && detail="  (Helm release k8s-nim-operator / nim-operator or workloads in nim-operator)"
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install if missing; requires GPU Operator)"
+    fi
+
+    printf -v lbl "$fmt" "NVIDIA AI Dynamo"
+    if [ "$HAVE_DYNAMO" = true ]; then
+        detail=""
+        [ -n "${AUTOMATIC_CHART_DYNAMO:-}" ] && detail="  (${AUTOMATIC_CHART_DYNAMO})"
+        [ -z "$detail" ] && detail="  (Helm release dynamo-platform in dynamo-system)"
+        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
+    else
+        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not auto-installed${NC}  (opt-in: ./runai-installer.sh ... --dynamo when NGC nvcr pull works)"
     fi
 
     printf -v lbl "$fmt" "StorageClass"
@@ -2191,6 +2250,9 @@ run_automatic_mode() {
         esac
         fi
         echo "# Optional clean slate first: ./runai-installer.sh --uninstall"
+        if [ "${RUNAI_ONLY:-false}" = true ]; then
+            echo "# This run used --automatic --runai-only: final install omitted prereqs; append --runai-only to manual replay commands above (vanilla: use --use-haproxy only, not --haproxy/--patch-haproxy)."
+        fi
     } >"$env_file"
     echo -e "\n${BLUE}Saved: ${env_file}${NC} (source before a manual full install if useful)"
 
@@ -2215,7 +2277,12 @@ run_automatic_mode() {
                 chain+=(--openshift-ingress-cacert "$RUNAI_OCP_INGRESS_CACERT_FILE")
             fi
         else
-            chain=(--dns "$AUTO_DNS" --runai-version "$RUNAI_VERSION" --use-haproxy --patch-haproxy --ip "$AUTO_IP" --haproxy)
+            # With --runai-only, automatic mode has already installed/patched HAProxy; only pass ingress class (not --haproxy/--patch-haproxy — validate_params rejects those with --runai-only).
+            if [ "${RUNAI_ONLY:-false}" = true ]; then
+                chain=(--dns "$AUTO_DNS" --runai-version "$RUNAI_VERSION" --use-haproxy)
+            else
+                chain=(--dns "$AUTO_DNS" --runai-version "$RUNAI_VERSION" --use-haproxy --patch-haproxy --ip "$AUTO_IP" --haproxy)
+            fi
         fi
         case "${RUNAI_ARTIFACT_SOURCE:-jfrog}" in
             ngc)
@@ -2227,6 +2294,7 @@ run_automatic_mode() {
         esac
         [ "${CLUSTER_ONLY:-false}" = true ] && chain+=(--cluster-only)
         [ -n "${LABEL_NODES:-}" ] && chain+=(--label "$LABEL_NODES")
+        [ "${RUNAI_ONLY:-false}" = true ] && chain+=(--runai-only)
         if [ -n "${LOG_FILE:-}" ]; then
             echo "Running: ./runai-installer.sh ${chain[*]}" >>"$LOG_FILE"
         fi
