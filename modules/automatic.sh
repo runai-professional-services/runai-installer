@@ -766,12 +766,6 @@ automatic_probe_stack() {
     echo "$HELM_RELEASES" | grep -qE 'lws|local-workload-service' && HAVE_LWS=true
     kubectl get pods -A 2>/dev/null | grep -qi 'lws' && HAVE_LWS=true
 
-    HAVE_MPI=false
-    kubectl get crd mpijobs.kubeflow.org &>/dev/null && HAVE_MPI=true
-    if [ "$HAVE_MPI" = false ]; then
-        echo "$HELM_RELEASES" | grep -qE 'mpi-operator|cm-kubernetes-mpi-operator' && HAVE_MPI=true
-    fi
-
     HAVE_TRAINING=false
     kubectl get crd pytorchjobs.kubeflow.org &>/dev/null && HAVE_TRAINING=true
     if [ "$HAVE_TRAINING" = false ]; then
@@ -821,7 +815,6 @@ automatic_probe_stack() {
         AUTOMATIC_CHART_KNATIVE_OPERATOR=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.name == "knative-operator") | .chart' 2>/dev/null | head -1)
         AUTOMATIC_CHART_GPU_OPERATOR=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.name == "gpu-operator" or .name == "nvidia-gpu-operator") | .chart' 2>/dev/null | head -1)
         AUTOMATIC_CHART_PROMETHEUS=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.chart | test("kube-prometheus-stack")) | .chart' 2>/dev/null | head -1)
-        AUTOMATIC_CHART_MPI=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.chart | test("mpi-operator")) | .chart' 2>/dev/null | head -1)
         AUTOMATIC_CHART_TRAINING=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select((.name == "training-operator" or .name == "kubeflow-training") or (.chart | test("training-operator"))) | .chart' 2>/dev/null | head -1)
         AUTOMATIC_CHART_NIM=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select((.name == "k8s-nim-operator" or .name == "nim-operator") or (.chart | test("k8s-nim-operator"))) | .chart' 2>/dev/null | head -1)
         AUTOMATIC_CHART_DYNAMO=$(printf '%s' "$AUTOMATIC_HELM_LIST_JSON" | jq -r '.[] | select(.name == "dynamo-platform" or (.chart | test("dynamo-platform"))) | .chart' 2>/dev/null | head -1)
@@ -853,10 +846,6 @@ automatic_print_installation_plan_will_do() {
     fi
     if [ "$HAVE_LWS" = false ]; then
         echo "  • Install LWS (Local Workload Service)."
-        any=true
-    fi
-    if [ "$HAVE_MPI" = false ]; then
-        echo "  • Install Kubeflow MPI Operator (MPIJob)."
         any=true
     fi
     if [ "$HAVE_TRAINING" = false ]; then
@@ -957,16 +946,6 @@ automatic_print_component_status_brief() {
     printf -v lbl "$fmt" "LWS"
     if [ "$HAVE_LWS" = true ]; then
         echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}"
-    else
-        echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install if missing)"
-    fi
-
-    printf -v lbl "$fmt" "MPI Operator"
-    if [ "$HAVE_MPI" = true ]; then
-        detail=""
-        [ -n "${AUTOMATIC_CHART_MPI:-}" ] && detail="  (${AUTOMATIC_CHART_MPI})"
-        [ -z "$detail" ] && kubectl get crd mpijobs.kubeflow.org &>/dev/null && detail="  (MPIJob CRD)"
-        echo -e "  ${LBL}${lbl}${NC} ${GREEN}installed${NC}${detail}"
     else
         echo -e "  ${LBL}${lbl}${NC} ${YELLOW}not detected${NC}  (will install if missing)"
     fi

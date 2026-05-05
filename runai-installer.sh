@@ -149,8 +149,7 @@ show_usage() {
     echo "  --gpu-operator         Install NVIDIA GPU Operator"
     echo "  --nim-operator         Install NVIDIA NIM Operator (Helm: nvidia/k8s-nim-operator; release name defaults to k8s-nim-operator)"
     echo "  --dynamo                 Install NVIDIA AI Dynamo platform (Helm OCI on nvcr.io; requires NGC_API_KEY or --ngc-key for pull). See ai-dynamo docs/kubernetes."
-    echo "  --training             Install Kubeflow Training Operator (PyTorchJob/TFJob/…; Kustomize standalone overlay)"
-    echo "  --mpi-operator         Install Kubeflow MPI Operator (MPIJob; upstream manifest, default v0.7.0)"
+    echo "  --training             Install Kubeflow Training Operator v1.9.2 (PyTorchJob/TFJob/MPIJob/…; standalone Kustomize overlay)"
     echo "  --lws                  Install Local Workload Service (LWS)"
     echo "  --install-sc           Install Local Path Provisioner and set as default storage class"
     echo "  --repo-secret FILE     Specify repository secret file location"
@@ -162,7 +161,7 @@ show_usage() {
     echo "  --skip-upload          Skip image uploads when images are already in registry (air-gapped mode)"
     echo "  --subdomain            Enable subdomain support with wildcard ingress"
     echo "  --install-only         Install prerequisites only (nginx, knative, lws, dynamo, storage-class) without Run.ai"
-    echo "  --runai-only           Install Run:ai only (skip BCM, ingress, Prometheus, GPU/NIM/Dynamo/MPI/training/LWS, StorageClass, Knative, internal DNS). With --automatic: prep stack as usual, final install omits prereqs (use --use-haproxy/--use-nginx, not --haproxy/--nginx, for ingress class)."
+    echo "  --runai-only           Install Run:ai only (skip BCM, ingress, Prometheus, GPU/NIM/Dynamo/training/LWS, StorageClass, Knative, internal DNS). With --automatic: prep stack as usual, final install omits prereqs (use --use-haproxy/--use-nginx, not --haproxy/--nginx, for ingress class)."
     echo "  --automatic            Prep cluster, then full Run:ai; supports --dns (override sslip), --cert/--key/--cacert; requires --ngc-api-key (NGC) or --repo-secret (JFrog)"
     echo "  --automatic-chain      Legacy alias; same credential requirements as --automatic"
     echo "  --automatic-stop-after PHASE  Stop after: helm|nodes|prereqs|tests|hardware|haproxy|certs|tls|storage"
@@ -197,9 +196,9 @@ show_usage() {
     echo "  # OpenShift: --automatic detects OCP, uses runai.apps.<baseDomain> and skips HAProxy (per NVIDIA docs)"
     echo ""
     echo "  # Installing with additional components (optional: --nginx / --haproxy to deploy an ingress controller)"
-    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --nim-operator --mpi-operator --training --lws --install-sc --repo-secret /root/jfrog"
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --nim-operator --training --lws --install-sc --repo-secret /root/jfrog"
     echo "  # Same with NVIDIA AI Dynamo (OCI chart on nvcr.io — pass NGC key even when Run:ai uses JFrog):"
-    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --nim-operator --dynamo --mpi-operator --training --lws --install-sc --repo-secret /root/jfrog --ngc-key \"\$NGC_API_KEY\""
+    echo "  $0 --dns 192.168.0.100.sslip.io --runai-version 2.20.22 --use-nginx --nginx --prometheus --gpu-operator --nim-operator --dynamo --training --lws --install-sc --repo-secret /root/jfrog --ngc-key \"\$NGC_API_KEY\""
     echo ""
     echo "  # Patching existing Nginx installation (optional; --ip only needed for the patch)"
     echo "  $0 --dns 192.168.0.100.sslip.io --ip 192.168.0.214 --use-nginx --patch-nginx --repo-secret /root/jfrog"
@@ -242,10 +241,10 @@ validate_params() {
             || [ "${PATCH_NGINX:-false}" = true ] || [ "${INSTALL_HAPROXY:-false}" = true ] \
             || [ "${PATCH_HAPROXY:-false}" = true ] || [ "${INSTALL_PROMETHEUS:-false}" = true ] \
             || [ "${INSTALL_GPU_OPERATOR:-false}" = true ] || [ "${INSTALL_NIM_OPERATOR:-false}" = true ] \
-            || [ "${INSTALL_DYNAMO:-false}" = true ] || [ "${INSTALL_TRAINING:-false}" = true ] || [ "${INSTALL_MPI_OPERATOR:-false}" = true ] \
+            || [ "${INSTALL_DYNAMO:-false}" = true ] || [ "${INSTALL_TRAINING:-false}" = true ] \
             || [ "${INSTALL_LWS:-false}" = true ] || [ "${INSTALL_STORAGE_CLASS:-false}" = true ] \
             || [ "${BCM_CONFIG:-false}" = true ] || [ "${INTERNAL_DNS:-false}" = true ]; then
-            echo -e "${RED}Error: --runai-only skips prerequisite installers; remove --nginx/--haproxy/--prometheus/--gpu-operator/--nim-operator/--dynamo/--training/--mpi-operator/--lws/--install-sc/--knative/--BCM/--internal-dns (and patch flags).${NC}" >&2
+            echo -e "${RED}Error: --runai-only skips prerequisite installers; remove --nginx/--haproxy/--prometheus/--gpu-operator/--nim-operator/--dynamo/--training/--lws/--install-sc/--knative/--BCM/--internal-dns (and patch flags).${NC}" >&2
             show_usage
         fi
     fi
@@ -412,7 +411,6 @@ load_env() {
     INSTALL_NIM_OPERATOR=${INSTALL_NIM_OPERATOR:-false}
     INSTALL_DYNAMO=${INSTALL_DYNAMO:-false}
     INSTALL_TRAINING=${INSTALL_TRAINING:-false}
-    INSTALL_MPI_OPERATOR=${INSTALL_MPI_OPERATOR:-false}
     INSTALL_LWS=${INSTALL_LWS:-false}
     INSTALL_STORAGE_CLASS=${INSTALL_STORAGE_CLASS:-false}
     BCM_CONFIG=${BCM_CONFIG:-false}
@@ -617,10 +615,6 @@ while [[ $# -gt 0 ]]; do
             INSTALL_TRAINING=true
             shift
             ;;
-        --mpi-operator)
-            INSTALL_MPI_OPERATOR=true
-            shift
-            ;;
         --lws)
             INSTALL_LWS=true
             shift
@@ -801,7 +795,7 @@ fi
 validate_params
 
 if [ "${RUNAI_ONLY:-false}" = true ]; then
-    echo -e "${BLUE}--runai-only:${NC} skipping prerequisite installers (BCM, DNS patch, ingress, Prometheus, GPU/NIM/Dynamo/MPI/training/LWS, StorageClass, Knative).${NC}"
+    echo -e "${BLUE}--runai-only:${NC} skipping prerequisite installers (BCM, DNS patch, ingress, Prometheus, GPU/NIM/Dynamo/training/LWS, StorageClass, Knative).${NC}"
 fi
 
 # Create namespaces first (skip if install-only mode)
@@ -922,14 +916,6 @@ if [ "${RUNAI_ONLY:-false}" != true ]; then
     if [ "$INSTALL_DYNAMO" = true ]; then
         if ! install_dynamo; then
             echo -e "${RED}❌ NVIDIA AI Dynamo installation failed${NC}"
-            exit 1
-        fi
-    fi
-
-    source ./modules/mpi-operator.sh
-    if [ "$INSTALL_MPI_OPERATOR" = true ]; then
-        if ! install_mpi_operator; then
-            echo -e "${RED}❌ MPI Operator installation failed${NC}"
             exit 1
         fi
     fi
@@ -1059,7 +1045,6 @@ fi
     echo "Install GPU Operator: $([ "$INSTALL_GPU_OPERATOR" = true ] && echo "Yes" || echo "No")"
     echo "Install NIM Operator: $([ "$INSTALL_NIM_OPERATOR" = true ] && echo "Yes" || echo "No")"
     echo "Install NVIDIA AI Dynamo: $([ "$INSTALL_DYNAMO" = true ] && echo "Yes" || echo "No")"
-    echo "Install MPI Operator: $([ "$INSTALL_MPI_OPERATOR" = true ] && echo "Yes" || echo "No")"
     echo "Install Training Operator: $([ "$INSTALL_TRAINING" = true ] && echo "Yes" || echo "No")"
     echo "Install LWS: $([ "$INSTALL_LWS" = true ] && echo "Yes" || echo "No")"
     echo "Install Storage Class: $([ "$INSTALL_STORAGE_CLASS" = true ] && echo "Yes" || echo "No")"
@@ -1094,7 +1079,6 @@ if [ "$INSTALL_ONLY" = true ]; then
     [ "$INSTALL_HAPROXY" = true ] && echo -e "  ${GREEN}✅ HAProxy Kubernetes Ingress${NC}"
     [ "$INSTALL_KNATIVE" = true ] && echo -e "  ${GREEN}✅ Knative Serving${NC}"
     [ "$INSTALL_LWS" = true ] && echo -e "  ${GREEN}✅ LWS${NC}"
-    [ "$INSTALL_MPI_OPERATOR" = true ] && echo -e "  ${GREEN}✅ Kubeflow MPI Operator${NC}"
     [ "$INSTALL_TRAINING" = true ] && echo -e "  ${GREEN}✅ Kubeflow Training Operator${NC}"
     [ "$INSTALL_NIM_OPERATOR" = true ] && echo -e "  ${GREEN}✅ NVIDIA NIM Operator${NC}"
     [ "$INSTALL_DYNAMO" = true ] && echo -e "  ${GREEN}✅ NVIDIA AI Dynamo platform${NC}"

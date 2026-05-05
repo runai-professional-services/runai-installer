@@ -1,7 +1,9 @@
 #!/bin/bash
 
-# Kubeflow Training Operator (PyTorchJob, TFJob, …) — standalone Kustomize overlay, not the MPI-only operator.
-# For MPIJob support without the full training stack, use --mpi-operator (modules/mpi-operator.sh).
+# Run:ai compatibility: Kubeflow Training Operator v1.9.2 (override ref: TRAINING_OPERATOR_GIT_REF)
+TRAINING_OPERATOR_GIT_REF="${TRAINING_OPERATOR_GIT_REF:-v1.9.2}"
+
+# Kubeflow Training Operator (PyTorchJob, TFJob, MPIJob, …) — standalone Kustomize overlay (includes MPIJob CRD/controller).
 #
 # NVIDIA Run:ai self-hosted: chart/image registry preparation (connected or air-gapped) is documented at:
 # https://run-ai-docs.nvidia.com/self-hosted/getting-started/installation/install-using-helm/preparations
@@ -36,7 +38,7 @@ training_reconcile_mpijobs_crd_if_needed() {
 
     echo -e "${YELLOW}⚠️ Deleting legacy mpijobs.kubeflow.org CRD (storedVersions still v2beta1; no MPIJob resources) so Training Operator can apply.${NC}"
     echo -e "${BLUE}   If a Helm mpi-operator release is still installed, uninstall it first or it may recreate this CRD.${NC}"
-    echo -e "${BLUE}   (MPIJob is included in Training Operator standalone; avoid --mpi-operator + --training on the same cluster.)${NC}"
+    echo -e "${BLUE}   (MPIJob is included in Training Operator standalone; do not install the separate kubeflow/mpi-operator on the same cluster.)${NC}"
     if ! kubectl delete crd mpijobs.kubeflow.org --wait=true --timeout=120s; then
         echo -e "${RED}❌ Could not delete mpijobs.kubeflow.org CRD (finalizers or RBAC?). Remove it manually, then re-run.${NC}" >&2
         return 1
@@ -68,7 +70,8 @@ install_training_operator() {
     # Install Kubeflow Training Operator
     # Standalone overlay can touch CRDs (e.g. mpijobs) already owned by field manager "helm" (MPI operator chart).
     # Without --force-conflicts, server-side apply fails with conflicts on .metadata.annotations / .spec.versions.
-    if ! log_command "kubectl apply --server-side --force-conflicts -k \"github.com/kubeflow/training-operator.git/manifests/overlays/standalone?ref=v1.9.2\"" "Install Kubeflow Training Operator"; then
+    # Matches upstream: kubectl apply --server-side -k "...?ref=v1.9.2". --force-conflicts avoids SSA failures over existing CRD field managers (e.g. Helm MPI installs).
+    if ! log_command "kubectl apply --server-side --force-conflicts -k \"github.com/kubeflow/training-operator.git/manifests/overlays/standalone?ref=${TRAINING_OPERATOR_GIT_REF}\"" "Install Kubeflow Training Operator (ref ${TRAINING_OPERATOR_GIT_REF})"; then
         echo -e "${YELLOW}⚠️ Warning: Failed to install Kubeflow Training Operator, continuing...${NC}"
         return 1
     else
