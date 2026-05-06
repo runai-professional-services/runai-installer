@@ -43,35 +43,43 @@ Use **`--automatic`** when you want the installer to **prepare the cluster and i
 | Optional **`--cert`** / **`--key`** / **`--cacert`** | Custom TLS ( **`--cert`** and **`--key`** together) |
 | Optional **`-y`** | Skip confirmation prompts |
 
+**Vanilla Kubernetes (automatic):** the installer **chooses one worker node** and uses **that worker’s IP address** for HAProxy: the ingress Service **`spec.externalIPs`** is set to that IP, and the default DNS name is usually derived from the same IP (e.g. **sslip.io**). Override the hostname anytime with **`--dns`**.
+
 **OpenShift:** `--automatic` detects OCP and does **not** use the HAProxy + ExternalIP pattern below—see [OpenShift (OCP)](#openshift-ocp).
 
 ### Vanilla Kubernetes: HAProxy and External IP
 
-On vanilla Kubernetes, automatic mode defaults to **HAProxy Ingress** and sets the ingress Service **`spec.externalIPs`** to your **worker node IP**. Clients use a **DNS name** that resolves to that IP (often **sslip.io**).
+On vanilla Kubernetes, **`--automatic`** deploys **HAProxy Ingress** and binds it to the **selected worker IP** as above. Clients reach Run:ai via a **DNS name** that resolves to that IP (unless you set **`--dns`** to something else).
 
-**Traffic flow (top → bottom):**
+**Traffic flow (request path, top to bottom):**
 
 ```
-       CLIENT
-          |
-          |  HTTPS
-          v
-       DNS name
-    (e.g. sslip.io)
-          |
-          |  A/AAAA record → worker IP
-          v
-         NODE
-   (external IP on
-    a worker)
-          |
-          v
-       HAProxy
-    (Ingress controller;
-     Service externalIPs)
-          |
-          v
-       Run:ai
+                    ┌────────────────────────┐
+                    │ Client (browser, CLI)  │
+                    └───────────┬────────────┘
+                                │  HTTPS
+                                ▼
+                    ┌────────────────────────┐
+                    │ DNS hostname           │
+                    │ (e.g. sslip.io record) │
+                    └───────────┬────────────┘
+                                │  resolves to that worker’s IP
+                                ▼
+                    ┌────────────────────────┐
+                    │ Worker (one selected)  │
+                    │ IP in externalIPs      │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ HAProxy Ingress        │
+                    │ Service externalIPs[]  │
+                    └───────────┬────────────┘
+                                │
+                                ▼
+                    ┌────────────────────────┐
+                    │ Run:ai control plane   │
+                    └────────────────────────┘
 ```
 
 ### `--automatic` examples (start here)
