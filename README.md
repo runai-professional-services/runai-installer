@@ -1,306 +1,297 @@
-# 🚀 Run.ai Installer
+# Run.ai Installer
 
-![Run.ai](https://img.shields.io/badge/AI%20Factory-Installation%20Wizard-blue)
-![Run.ai](https://img.shields.io/badge/Run.ai-Automation-green)
-![Kubernetes](https://img.shields.io/badge/Kubernetes-Ready-brightgreen)
+![Run.ai](https://img.shields.io/badge/Run.ai-Installer-blue)
+![Kubernetes](https://img.shields.io/badge/Kubernetes-Ready-green)
 
-## 📋 Table of Contents
+Automates Run:ai on an existing Kubernetes cluster. Optional: install a cluster with Kubespray (`install-k8.sh`).
 
-- [Overview](#-overview)
-- [Prerequisites](#-prerequisites)
-- [Quick Start](#-quick-start)
-- [Configuration Options](#-configuration-options)
-- [Examples](#-examples)
-- [Automatic Mode (HAProxy Default)](#-automatic-mode-haproxy-default)
-- [What It Does](#-what-it-does)
-- [Default Access](#-default-access)
-- [Kubernetes Installation](#-kubernetes-installation)
-- [Contributing](#-contributing)
+---
 
-## 🌟 Overview
+## Contents
 
-The Run.ai Installer is a comprehensive solution that automates the deployment of Run.ai on Kubernetes clusters. This tool provides two main installation paths:
+- [Prerequisites](#prerequisites)
+- [1. Recommended: `--automatic`](#1-recommended---automatic)
+- [2. Manual install](#2-manual-install)
+- [3. Advanced examples](#3-advanced-examples)
+- [OpenShift (OCP)](#openshift-ocp)
+- [Standalone helper scripts](#standalone-helper-scripts)
+- [What the installer does](#what-the-installer-does)
+- [Default access](#default-access)
+- [Reference: all options](#reference-all-options)
+- [Kubernetes cluster install](#kubernetes-cluster-install-kubespray)
+- [Contributing & license](#contributing)
 
-1. **Run.ai Platform Installation** - Deploy Run.ai on an existing Kubernetes cluster (primary focus)
-2. **Kubernetes Cluster Installation** - Deploy a complete Kubernetes cluster using Kubespray (optional)
+---
 
-This simplifies what would otherwise be a complex, multi-step installation process into simple commands with customizable options.
+## Prerequisites
 
-## ✨ Features
+- NVIDIA Run:ai license / repo credentials
+- A Kubernetes cluster and working `kubectl`
+- `helm`, `jq`, and `openssl` (for typical installs)
 
-- 🔄 **Complete Run.ai Installation**: Automates the entire Run.ai deployment process
-- 🔐 **Certificate Management**: Generates self-signed certificates or uses your own
-- 🌐 **DNS Configuration**: Sets up internal DNS and patches CoreDNS
-- 🚦 **Ingress Control**: Installs and configures Nginx Ingress Controller
-- 📊 **Monitoring**: Optional Prometheus Stack installation
-- 🖥️ **GPU Support**: Optional NVIDIA GPU Operator installation with enhanced detection
-- 🚀 **Serverless**: Optional Knative serving installation with auto-scaling
-- 🔧 **BCM Integration**: Optional Bright Cluster Manager configuration
-- 🏭 **Air-gapped Support**: Complete offline installation capabilities
-- 🌐 **Subdomain Support**: Wildcard ingress for unique workload URLs
-- 📦 **Prerequisites-Only Mode**: Install infrastructure components without Run.ai
-- 🛠️ **Kubernetes Cluster Setup**: Full Kubernetes installation using Kubespray (optional)
+---
 
-## 🔍 Prerequisites
+## 1. Recommended: `--automatic`
 
-### For Run.ai Installation
-- A license file from NVIDIA 
-- Kubernetes cluster (or use our Kubernetes installer)
-- `kubectl` configured to access your cluster
-- `helm` installed
-- `jq` installed for JSON processing
-- `openssl` for certificate generation
+Use **`--automatic`** when you want the installer to **prepare the cluster and install Run:ai** in one flow.
 
-## 🚀 Quick Start
+| You provide | Notes |
+|-------------|--------|
+| **`--ngc-key`** or **`NGC_API_KEY`** | NGC path (`--ngc-key` implies `--ngc`) |
+| **or** **`--repo-secret`** | JFrog path — do **not** mix NGC + JFrog flags on the same command |
+| Optional **`--dns`** | Overrides the default sslip-style name |
+| Optional **`--cert`** / **`--key`** / **`--cacert`** | Custom TLS ( **`--cert`** and **`--key`** together) |
+| Optional **`-y`** | Skip confirmation prompts |
 
-### Step 1: Install Run.ai
-```sh
-./runai-installer.sh --dns 192.168.1.100.sslip.io --runai-version 2.22.47 --repo-secret ./license.yaml
+**OpenShift:** `--automatic` detects OCP and does **not** use the HAProxy + ExternalIP pattern below—see [OpenShift (OCP)](#openshift-ocp).
+
+### Vanilla Kubernetes: HAProxy and External IP
+
+On vanilla Kubernetes, automatic mode defaults to **HAProxy Ingress** and sets the ingress Service **`spec.externalIPs`** to your **worker node IP**. Clients use a **DNS name** that resolves to that IP (often **sslip.io**).
+
+**Traffic flow (top → bottom):**
+
+```
+       CLIENT
+          |
+          |  HTTPS
+          v
+       DNS name
+    (e.g. sslip.io)
+          |
+          |  A/AAAA record → worker IP
+          v
+         NODE
+   (external IP on
+    a worker)
+          |
+          v
+       HAProxy
+    (Ingress controller;
+     Service externalIPs)
+          |
+          v
+       Run:ai
 ```
 
-### Required Parameters
-- `--dns`: DNS name for Run.ai access
-- `--runai-version`: Run.ai version to install (use `latest` to auto-detect newest version)
-- `--repo-secret`: Path to your Run.ai license file
+### `--automatic` examples (start here)
 
-### Option Dependencies
-- `--internal-dns` requires `--ip`
-- `--cert` requires `--key` (and vice versa)
-- `--patch-nginx` requires `--ip`
-
-## ⚙️ Configuration Options
-
-### Run.ai Installer Options
-
-| Option | Description | Required |
-|--------|-------------|----------|
-| `--dns DNS_NAME` | DNS name for Run.ai certificates | ✅ |
-| `--runai-version VER` | Run.ai version to install (use `latest` for newest) | ✅ |
-| `--repo-secret FILE` | Repository secret file location | ✅ |
-| `--cluster-only` | Skip backend, install cluster only | ❌ |
-| `--internal-dns` | Configure internal DNS | ❌ |
-| `--ip IP_ADDRESS` | IP address (required with --internal-dns) | ❌ |
-| `--cert CERT_FILE` | Use provided certificate file | ❌ |
-| `--key KEY_FILE` | Use provided key file | ❌ |
-| `--cacert CA_CERT_FILE` | Use provided CA certificate file | ❌ |
-| `--no-cert` | Skip certificate setup | ❌ |
-| `--knative` | Install Knative serving | ❌ |
-| `--nginx` | Install Nginx Ingress Controller | ❌ |
-| `--patch-nginx` | Patch existing Nginx with external IP | ❌ |
-| `--prometheus` | Install Prometheus Stack | ❌ |
-| `--gpu-operator` | Install NVIDIA GPU Operator | ❌ |
-| `--training` | Install Kubeflow Training Operator | ❌ |
-| `--lws` | Install Local Workload Service (LWS) | ❌ |
-| `--install-sc` | Install Local Path Provisioner | ❌ |
-| `--BCM` | Configure Bright Cluster Manager | ❌ |
-| `--air-gapped` | Enable air-gapped installation | ❌ |
-| `--file FILE` | Air-gapped tar.gz file | ❌ |
-| `--registry URL` | Registry URL for air-gapped installation | ❌ |
-| `--registry-secret FILE` | Registry secret YAML file | ❌ |
-| `--skip-upload` | Skip image uploads (air-gapped mode) | ❌ |
-| `--subdomain` | Enable subdomain support with wildcard ingress | ❌ |
-| `--install-only` | Install prerequisites only (no Run.ai) | ❌ |
-| `--uninstall` | Uninstall Run.ai completely | ❌ |
-
-## 📝 Examples
-
-### Basic Installations
-
-**Using sslip.io (automatic DNS resolution):**
 ```sh
-./runai-installer.sh --dns 192.168.0.100.sslip.io --runai-version 2.22.47 --repo-secret ./license.yaml
+# NGC — minimal
+./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY"
 ```
 
-**Using latest Run.ai version:**
 ```sh
-./runai-installer.sh --dns runai.example.com --runai-version latest --repo-secret ./license.yaml
+# NGC — custom DNS + non-interactive
+./runai-installer.sh --automatic -y --ngc-key "$NGC_API_KEY" --dns runai.example.com
 ```
 
-**Using custom domain:**
 ```sh
-./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 --repo-secret ./license.yaml
+# NGC — custom TLS
+./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY" \
+  --dns runai.example.com \
+  --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem
 ```
 
-### Advanced Configurations
+```sh
+# JFrog
+./runai-installer.sh --automatic -y --repo-secret ./license.yaml
+```
 
-**Internal DNS setup:**
+```sh
+# Stop after a phase (debug / partial runs)
+./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY" --automatic-stop-after prereqs
+```
+
+---
+
+## 2. Manual install
+
+Use explicit flags when you are not using **`--automatic`**.
+
+**Usually required:** `--dns`, `--runai-version`, `--repo-secret` (unless air-gapped / other documented exceptions).
+
+**Vanilla Kubernetes:** pick an ingress class for the control plane, e.g. **`--use-haproxy`** (often with **`--haproxy`**) or **`--use-nginx`** (often with **`--nginx`**). See `runai-installer.sh --help`.
+
+```sh
+./runai-installer.sh --dns 192.168.0.100.sslip.io --runai-version 2.22.47 \
+  --use-nginx --nginx --repo-secret ./license.yaml
+```
+
+```sh
+./runai-installer.sh --dns runai.example.com --runai-version latest \
+  --use-nginx --repo-secret ./license.yaml
+```
+
+**Common option rules**
+
+- `--internal-dns` → needs `--ip`
+- `--cert` ↔ `--key` (use both)
+- `--patch-nginx` / `--patch-haproxy` → needs `--ip`
+
+---
+
+## 3. Advanced examples
+
+**Internal DNS**
+
 ```sh
 ./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
-  --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
+  --use-nginx --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
 
-**Custom certificates:**
-```sh
-./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
-  --cert /path/to/cert.pem --key /path/to/key.pem --repo-secret ./license.yaml
-```
+**Custom certificates**
 
-**Custom certificates with CA:**
 ```sh
 ./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
+  --use-nginx \
   --cert /path/to/cert.pem --key /path/to/key.pem \
   --cacert /path/to/rootCA.pem --repo-secret ./license.yaml
 ```
 
-**Full installation with all components:**
+**Many optional components**
+
 ```sh
 ./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
-  --nginx --prometheus --gpu-operator --training --lws --install-sc \
+  --use-nginx --nginx --prometheus --gpu-operator --training --lws --install-sc \
   --internal-dns --ip 172.21.140.20 --repo-secret ./license.yaml
 ```
 
-**BCM integration:**
-```sh
-./runai-installer.sh --dns 192.168.0.200.sslip.io --runai-version 2.22.47 \
-  --nginx --prometheus --gpu-operator --knative --BCM \
-  --ip 192.168.0.200 --repo-secret ./license.yaml
-```
+**Subdomain / wildcard workloads**
 
-**Subdomain support (workload URLs):**
 ```sh
 ./runai-installer.sh --dns runai.example.com --runai-version 2.22.47 \
-  --subdomain --repo-secret ./license.yaml
+  --use-nginx --subdomain --repo-secret ./license.yaml
 ```
 
-**Prerequisites-only installation (no Run.ai):**
+**Prerequisites only (no Run:ai)**
+
 ```sh
-# Install nginx, knative, lws, and storage class only
 ./runai-installer.sh --install-only --nginx --knative --lws --install-sc
 ```
 
-## 🤖 Automatic Mode (HAProxy Default)
+**Air-gapped** — use **`--air-gapped`** with **`--file`** and **`--registry`**. This path is **not** combined with **`--automatic`** in the current installer.
 
-When using `--automatic`, you must provide an **NGC API key** (`--ngc-key` or `NGC_API_KEY`) so the installer can authenticate to Helm and create the **nvcr.io** pull secret (`runai-reg-creds`). Chart and image sources use **NGC** (`--ngc-key` implies `--ngc`).
-
-The installer uses **HAProxy** as the default ingress path for Run:ai and passes `--use-haproxy` for the chained installation flow.
-
-It also patches the HAProxy service `externalIPs` to the selected worker node IP (`<worker_ip>.sslip.io`), then verifies the service includes that IP.
-
-**Run automatic mode:**
 ```sh
-./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY"
-```
-
-**Validate while testing:**
-```sh
-# show externalIPs on the expected HAProxy service
-kubectl get svc -n haproxy-controller haproxy-kubernetes-ingress -o jsonpath='{.spec.externalIPs}'
-echo
-
-# see worker/external IP mapping used by automatic flow
-kubectl get nodes -o wide
-```
-
-Expected result: HAProxy service `externalIPs` contains the worker node IP selected by automatic mode.
-
-**Air-gapped installation:**
-```sh
-./runai-installer.sh --dns 192.168.0.100.sslip.io --air-gapped \
-  --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com \
+./runai-installer.sh --dns 192.168.0.100.sslip.io --use-nginx \
+  --air-gapped --file /path/to/runai-air-gapped.tar.gz --registry registry.example.com \
   --repo-secret ./license.yaml
 ```
 
-**Patch existing Nginx:**
-```sh
-./runai-installer.sh --dns runai.example.com --ip 192.168.0.200 \
-  --patch-nginx --repo-secret ./license.yaml
-```
+**Uninstall**
 
-**Uninstall Run.ai:**
 ```sh
 ./runai-installer.sh --uninstall
+./runai-installer.sh --uninstall -y
 ```
 
-## 🛠️ What It Does
+---
 
-### Run.ai Installation Process
-1. **Validates** your environment and parameters
-2. **Installs** prerequisites (Nginx, Prometheus, GPU Operator, Knative, LWS) if requested
-3. **Detects** GPU nodes with enhanced detection for nvidia.com/gpu.* labels
-4. **Labels** CPU nodes for Run.ai system services (excludes master/control-plane nodes)
-5. **Configures** DNS settings (internal or hosts file)
-6. **Generates** or uses provided certificates (skipped in --install-only mode)
-7. **Deploys** Run.ai backend services
-8. **Configures** the Run.ai cluster
-9. **Creates** TLS secrets with idempotent kubectl apply
-10. **Sets up** subdomain support with wildcard ingress (if --subdomain)
-11. **Verifies** the installation
-12. **Patches BCM** (if requested) to route traffic to Run.ai
+## OpenShift (OCP)
 
-## 🔒 Default Access
+Run:ai uses **Routes** and **`kubernetesDistribution=openshift`**. Do **not** use **`--use-nginx` / `--use-haproxy`** for the control plane like on vanilla Kubernetes.
 
-After installation, you can access Run.ai at:
-- **URL**: `https://YOUR_DNS_NAME`
-- **Default credentials**: `test@run.ai` / `XXX`
-
-## 🆕 Recent Improvements
-
-### Enhanced Features
-- **GPU Detection**: Automatic detection of GPU nodes via `nvidia.com/gpu.count`, `nvidia.com/gpu.product`, and `nvidia.com/gpu.present` labels
-- **Smart Node Labeling**: CPU nodes are automatically labeled for Run.ai system services, with master/control-plane nodes excluded
-- **Subdomain Support**: Wildcard ingress for unique workload URLs (e.g., `jupyter-abc123.runai.example.com`)
-- **Prerequisites-Only Mode**: Install infrastructure components (nginx, knative, lws, storage) without Run.ai
-- **Auto-Version Detection**: Use `--runai-version latest` to automatically detect and install the newest Run.ai version
-- **Idempotent TLS Secrets**: Uses `kubectl apply` to prevent duplicate secret creation errors
-- **Air-gapped Improvements**: Fixed certificate path resolution and TLS secret timing
-
-### Bug Fixes
-- Fixed duplicate TLS secret creation causing installation failures
-- Fixed air-gapped mode + subdomain TLS secret path issues
-- Fixed hanging kubectl apply -f - in subdomain logging
-- Fixed RunaiConfig patch timing to wait for pods to be ready
-- Enhanced GPU node detection for various NVIDIA GPU configurations
-
-## 🖥️ Kubernetes Installation
-
-If you don't have a Kubernetes cluster, you can install one using our `install-k8.sh` script:
-
-### Prerequisites for Kubernetes Installation
-- Ubuntu/Debian system
-- Internet connectivity (for initial setup)
-- SSH server running
-- Sudo privileges
-
-### Installation Options
+- **`--openshift`** — optional **`--dns`** if the installer can derive `runai.apps.<baseDomain>`
+- **`--no-cert`** — typical when using the cluster router TLS
+- **`--openshift-ingress-cacert`** — optional router CA PEM with **`--openshift`** + **`--no-cert`**
 
 ```sh
-# Full installation with all components
-./install-k8.sh
+./runai-installer.sh --openshift --no-cert --ngc --ngc-api-key "$NGC_API_KEY" --runai-version 2.22.47
+```
 
-# Core Kubernetes only (no add-ons)
-./install-k8.sh --core
+---
 
-# Install add-ons on existing cluster
+## Standalone helper scripts
+
+Not called by `runai-installer.sh`.
+
+| Script | Purpose |
+|--------|---------|
+| **`delete-pre-req.sh`** | Removes optional stack: Prometheus, Knative, GPU Operator, HAProxy, Training Operator, NIM Operator, LWS (`-y`, `--dry-run`) |
+| **`dynamo-install.sh`** | Installs NVIDIA AI Dynamo (`dynamo-platform`); default chart pull via HTTPS tarball + NGC key ([Dynamo quickstart](https://docs.nvidia.com/dynamo/dev/getting-started/kubernetes-deployment)) |
+
+---
+
+## What the installer does
+
+1. Validates flags and environment  
+2. Optionally installs add-ons (ingress, Prometheus, GPU Operator, Knative, LWS, …)  
+3. Labels nodes, DNS/certs as requested  
+4. Deploys Run:ai backend and cluster (or air-gapped flow)  
+5. Applies TLS secrets and optional subdomain / BCM steps  
+
+---
+
+## Default access
+
+- **URL:** `https://YOUR_DNS_NAME`  
+- **Default login (if unchanged):** `test@run.ai` / per your deployment docs  
+
+---
+
+## Reference: all options
+
+| Option | Description | Required |
+|--------|-------------|----------|
+| `--dns DNS_NAME` | Run:ai FQDN / certificates | ✅ (most manual installs) |
+| `--runai-version VER` | Version or `latest` | ✅ (most manual installs) |
+| `--repo-secret FILE` | License / registry secret file | ✅ (most manual installs) |
+| `--automatic` | Prep + Run:ai; NGC or JFrog | ❌ |
+| `--automatic-chain` | Legacy alias of `--automatic` | ❌ |
+| `--automatic-stop-after` | Stop after `helm`, `nodes`, `prereqs`, … | ❌ |
+| `-y`, `--yes` | Non-interactive (`--automatic`, `--uninstall`) | ❌ |
+| `--cluster-only` | Cluster chart only (skip backend) | ❌ |
+| `--internal-dns` | CoreDNS patch | ❌ |
+| `--ip` | Required with `--internal-dns`, patch-nginx, patch-haproxy | ❌ |
+| `--cert` / `--key` / `--cacert` | Custom TLS | ❌ |
+| `--no-cert` | Skip cert generation | ❌ |
+| `--knative` | Knative Serving | ❌ |
+| `--nginx` / `--patch-nginx` | Nginx ingress | ❌ |
+| `--haproxy` / `--patch-haproxy` | HAProxy ingress | ❌ |
+| `--use-haproxy` / `--use-nginx` | CP ingress class (vanilla K8s) | ❌ |
+| `--prometheus` | Prometheus stack | ❌ |
+| `--gpu-operator` | NVIDIA GPU Operator | ❌ |
+| `--training` | Kubeflow Training Operator | ❌ |
+| `--lws` | Local Workload Service | ❌ |
+| `--install-sc` | Default StorageClass (local-path) | ❌ |
+| `--nim-operator` | NIM Operator | ❌ |
+| `--dynamo` | NVIDIA AI Dynamo | ❌ |
+| `--BCM` | Bright Cluster Manager | ❌ |
+| `--air-gapped` / `--file` / `--registry` | Offline bundle install | ❌ |
+| `--registry-secret` / `--skip-upload` | Air-gapped helpers | ❌ |
+| `--subdomain` | Wildcard ingress | ❌ |
+| `--install-only` | Prerequisites only | ❌ |
+| `--uninstall` | Remove Run:ai | ❌ |
+| `--openshift` | OpenShift distribution | ❌ |
+| `--openshift-ingress-cacert FILE` | OCP router CA (with `--no-cert`) | ❌ |
+
+For the full CLI text, run:
+
+```sh
+./runai-installer.sh --help
+```
+
+---
+
+## Kubernetes cluster install (Kubespray)
+
+```sh
+./install-k8.sh              # full stack
+./install-k8.sh --core     # Kubernetes only
 ./install-k8.sh --addons --nginx --prometheus --gpu
-
-# Reset existing cluster
 ./install-k8.sh --clean
 ```
 
-**Kubernetes Installation Options:**
-- `--full` - Complete installation with all add-ons (default)
-- `--core` - Core Kubernetes only
-- `--addons` - Install add-ons on existing cluster
-- `--nginx` - Include Nginx Ingress Controller
-- `--prometheus` - Include Prometheus monitoring stack
-- `--gpu` - Include NVIDIA GPU Operator
-- `--clean` - Reset existing cluster
+---
 
-### Kubernetes Installation Process
-1. **Sets up** system prerequisites (Python, Helm, SSH keys)
-2. **Configures** Kubespray inventory
-3. **Installs** Kubernetes cluster using Ansible
-4. **Deploys** optional add-ons (Nginx, Prometheus, GPU Operator)
-5. **Configures** kubectl access
+## Contributing
 
-## 🤝 Contributing
+Issues and pull requests are welcome.
 
-Contributions are welcome! Feel free to submit issues or pull requests.
+## License
 
-## 📜 License
+MIT — see [LICENSE](LICENSE).
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+## Acknowledgements
 
-## 🙏 Acknowledgements
-
-- Script is maintained by Erez Kirson - ekirson@nvidia.com
+Maintained by Erez Kirson — ekirson@nvidia.com
