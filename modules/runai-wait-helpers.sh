@@ -140,3 +140,45 @@ runai_helm_release_is_deployed() {
   s=$(printf '%s' "$s" | tr '[:upper:]' '[:lower:]')
   [ "$s" = "deployed" ]
 }
+
+# --- Slow cluster / slow image pulls (optional env overrides) ---
+# RUNAI_INSTALL_WAIT_MAX_ATTEMPTS — retries for auth probe, token, and (air-gapped) install-info API.
+#   Each attempt sleeps RUNAI_INSTALL_WAIT_SLEEP_SEC. Default 600 (~50 min at 5s sleep).
+# RUNAI_INSTALL_WAIT_SLEEP_SEC — seconds between those attempts (default 5).
+# RUNAI_POD_READY_POLL_SLEEP_SEC — sleep between pod-readiness / Helm status polls (default 10).
+# RUNAI_CLUSTER_INSTALL_MAX_RETRIES — air-gapped only: how many times to re-run cluster install.sh (default 10).
+runai_install_wait_max_attempts() {
+  local v="${RUNAI_INSTALL_WAIT_MAX_ATTEMPTS:-600}"
+  if [[ "$v" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s' "$v"
+  else
+    printf '600'
+  fi
+}
+
+runai_install_wait_sleep_sec() {
+  local v="${RUNAI_INSTALL_WAIT_SLEEP_SEC:-5}"
+  if [[ "$v" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s' "$v"
+  else
+    printf '5'
+  fi
+}
+
+runai_pod_ready_poll_sleep_sec() {
+  local v="${RUNAI_POD_READY_POLL_SLEEP_SEC:-10}"
+  if [[ "$v" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s' "$v"
+  else
+    printf '10'
+  fi
+}
+
+runai_cluster_install_max_retries() {
+  local v="${RUNAI_CLUSTER_INSTALL_MAX_RETRIES:-10}"
+  if [[ "$v" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s' "$v"
+  else
+    printf '10'
+  fi
+}

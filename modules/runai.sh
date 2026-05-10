@@ -134,7 +134,8 @@ check_runai_installed() {
 
 # Function to get authentication token
 get_auth_token() {
-    local max_attempts=50
+    local max_attempts
+    max_attempts=$(runai_install_wait_max_attempts)
     local attempt=1
     local auth_url="https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token"
     
@@ -165,7 +166,7 @@ get_auth_token() {
             fi
         fi
 
-        sleep 5
+        sleep "$(runai_install_wait_sleep_sec)"
         ((attempt++))
     done
     
@@ -174,7 +175,8 @@ get_auth_token() {
 
 # Function to check if authentication service is responding
 check_auth_service() {
-    local max_attempts=50
+    local max_attempts
+    max_attempts=$(runai_install_wait_max_attempts)
     local attempt=1
     local auth_url="https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token"
     
@@ -195,7 +197,7 @@ check_auth_service() {
         fi
         
         echo -ne "⏳ Waiting for authentication service to respond... (Attempt $attempt/$max_attempts)\r"
-        sleep 5
+        sleep "$(runai_install_wait_sleep_sec)"
         ((attempt++))
     done
     
@@ -325,7 +327,7 @@ install_runai() {
                 echo -e "\n${GREEN}✅ Run.ai backend pods are ready and Helm is deployed (runai-backend)${NC}"
                 break
             fi
-            sleep 5
+            sleep "$(runai_pod_ready_poll_sleep_sec)"
         done
 
         echo -e "\n${BLUE}▶ Backend is fully up — continuing with control-plane API (auth + curl), then Helm install in namespace ${GREEN}runai${BLUE}.${NC}"
@@ -367,7 +369,7 @@ install_runai() {
                 break
             fi
             echo -ne "⏳ Waiting for valid installation information...\r"
-            sleep 5
+            sleep "$(runai_install_wait_sleep_sec)"
         done
     else
         # If in cluster-only mode, we need to check the existing backend configuration
@@ -455,7 +457,7 @@ install_runai() {
                 break
             fi
             echo -ne "⏳ Waiting for valid installation information...\r"
-            sleep 5
+            sleep "$(runai_install_wait_sleep_sec)"
         done
     fi
 
@@ -526,7 +528,7 @@ install_runai() {
             echo -e "\n${GREEN}✅ Run.ai cluster pods are ready and Helm is deployed (runai)${NC}"
             break
         fi
-        sleep 5
+        sleep "$(runai_pod_ready_poll_sleep_sec)"
     done
 
     echo -e "${GREEN}✅ Run.ai installation completed successfully!${NC}"

@@ -347,7 +347,7 @@ EOF
             echo -e "\n${GREEN}✅ Run.ai backend pods are ready and Helm is deployed (runai-backend)${NC}"
             break
         fi
-        sleep 5
+        sleep "$(runai_pod_ready_poll_sleep_sec)"
     done
     
     # Set up environment variables for API calls
@@ -357,7 +357,8 @@ EOF
     
     # Check if authentication service is responding
     echo -e "${BLUE}Checking if authentication service is responding...${NC}"
-    local max_attempts=50
+    local max_attempts
+    max_attempts=$(runai_install_wait_max_attempts)
     local attempt=1
     local auth_url="https://$control_plane_domain/auth/realms/runai/protocol/openid-connect/token"
     
@@ -375,7 +376,7 @@ EOF
         fi
         
         echo -ne "⏳ Waiting for authentication service to respond... (Attempt $attempt/$max_attempts)\r"
-        sleep 5
+        sleep "$(runai_install_wait_sleep_sec)"
         ((attempt++))
     done
     
@@ -410,7 +411,7 @@ EOF
         fi
 
         echo -ne "⏳ Waiting for authentication token... (Attempt $attempt/$max_attempts)\r"
-        sleep 5
+        sleep "$(runai_install_wait_sleep_sec)"
         ((attempt++))
     done
     
@@ -462,7 +463,7 @@ EOF
         fi
         
         echo -ne "⏳ Waiting for valid installation information... (Attempt $attempt/$max_attempts)\r"
-        sleep 5
+        sleep "$(runai_install_wait_sleep_sec)"
         ((attempt++))
     done
     
@@ -496,7 +497,8 @@ EOF
     echo "$(cat install.sh)" >> "$LOG_FILE"
     
     # Execute the installation script with retry logic
-    local max_retries=3
+    local max_retries
+    max_retries=$(runai_cluster_install_max_retries)
     local retry_count=0
     local install_success=false
     
@@ -545,7 +547,7 @@ EOF
             echo -e "\n${GREEN}✅ Run.ai cluster pods are ready and Helm is deployed (runai)${NC}"
             break
         fi
-        sleep 5
+        sleep "$(runai_pod_ready_poll_sleep_sec)"
     done
     
     # Apply cluster domain star TLS secret (after all pods are ready)
