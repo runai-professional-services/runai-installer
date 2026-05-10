@@ -26,93 +26,48 @@ Automates Run:ai on an existing Kubernetes cluster. Optional: install a cluster 
 
 ## Prerequisites
 
-- NVIDIA Run:ai license / repo credentials
-- A Kubernetes cluster and working `kubectl`
-- `helm`, `jq`, and `openssl` (for typical installs)
+- Run:ai license / registry credentials (NGC or JFrog)
+- Kubernetes cluster and working `kubectl`
+- `helm`, `jq`, `openssl` (typical installs)
 
 ---
 
 ## 1. Recommended: `--automatic`
 
-**Start here:** **`--automatic`** is the recommended way to use this installer. It **prepares the cluster and installs Run:ai** in one flow. Pick **either** JFrog (`--repo-secret`) **or** NGC (`--ngc-key` / `NGC_API_KEY`); do **not** mix NGC and JFrog flags on the same command.
+**Try this first** — NGC (API key on the CLI or in `NGC_API_KEY`):
 
 ```sh
-# JFrog (example: non-interactive)
+./runai-installer.sh --automatic --ngc-api-key "$NGC_API_KEY"
+```
+
+JFrog instead (non-interactive example):
+
+```sh
 ./runai-installer.sh --automatic -y --repo-secret ./license.yaml
 ```
 
-```sh
-# NGC (example: pass your NVIDIA NGC API key)
-./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY"
-```
+Use **either** NGC **or** JFrog, not both. Common extras: **`-y`** (no prompts), **`--dns`**, **`--cert` / `--key` / `--cacert`**.
 
-### More detail (after you have a first run)
+On **vanilla Kubernetes**, the installer picks a worker, sets HAProxy **`externalIPs`** to that IP, and usually derives DNS (e.g. sslip-style) unless you pass **`--dns`**. On **OpenShift**, there is no HAProxy + ExternalIP path — see [OpenShift (OCP)](#openshift-ocp).
 
-| You provide | Notes |
-|-------------|--------|
-| **`--ngc-key`** or **`NGC_API_KEY`** | NGC path (`--ngc-key` implies `--ngc`) |
-| **or** **`--repo-secret`** | JFrog path — do **not** mix NGC + JFrog flags on the same command |
-| Optional **`--dns`** | Overrides the default sslip-style name |
-| Optional **`--cert`** / **`--key`** / **`--cacert`** | Custom TLS ( **`--cert`** and **`--key`** together) |
-| Optional **`-y`** | Skip confirmation prompts |
-
-**Vanilla Kubernetes (automatic):** the installer **chooses one worker node** and uses **that worker’s IP address** for HAProxy: the ingress Service **`spec.externalIPs`** is set to that IP, and the default DNS name is usually derived from the same IP (e.g. **sslip.io**). Override the hostname anytime with **`--dns`**.
-
-**OpenShift:** `--automatic` detects OCP and does **not** use the HAProxy + ExternalIP pattern below—see [OpenShift (OCP)](#openshift-ocp).
-
-### Vanilla Kubernetes: HAProxy and External IP
-
-On vanilla Kubernetes, **`--automatic`** deploys **HAProxy Ingress** and binds it to the **selected worker IP** as above. Clients reach Run:ai via a **DNS name** that resolves to that IP (unless you set **`--dns`** to something else).
-
-**Traffic flow (request path, top to bottom):**
-
-```
-                    ┌────────────────────────┐
-                    │ Client (browser, CLI)  │
-                    └───────────┬────────────┘
-                                │  HTTPS
-                                ▼
-                    ┌────────────────────────┐
-                    │ DNS hostname           │
-                    │ (e.g. sslip.io record) │
-                    └───────────┬────────────┘
-                                │  resolves to that worker’s IP
-                                ▼
-                    ┌────────────────────────┐
-                    │ Worker (one selected)  │
-                    │ IP in externalIPs      │
-                    └───────────┬────────────┘
-                                │
-                                ▼
-                    ┌────────────────────────┐
-                    │ HAProxy Ingress        │
-                    │ Service externalIPs[]  │
-                    └───────────┬────────────┘
-                                │
-                                ▼
-                    ┌────────────────────────┐
-                    │ Run:ai control plane   │
-                    └────────────────────────┘
-```
-
-### More `--automatic` examples
+<details>
+<summary>More <code>--automatic</code> examples</summary>
 
 ```sh
-# NGC — custom DNS + non-interactive
-./runai-installer.sh --automatic -y --ngc-key "$NGC_API_KEY" --dns runai.example.com
+./runai-installer.sh --automatic -y --ngc-api-key "$NGC_API_KEY" --dns runai.example.com
 ```
 
 ```sh
-# NGC — custom TLS
-./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY" \
+./runai-installer.sh --automatic --ngc-api-key "$NGC_API_KEY" \
   --dns runai.example.com \
   --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem
 ```
 
 ```sh
-# Stop after a phase (debug / partial runs)
-./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY" --automatic-stop-after prereqs
+./runai-installer.sh --automatic --ngc-api-key "$NGC_API_KEY" --automatic-stop-after prereqs
 ```
+
+</details>
 
 ---
 
@@ -310,13 +265,20 @@ Maintained by Erez Kirson — ekirson@nvidia.com
 
 ## Slow image pulls & flaky networks
 
-Slow image pulls or flaky networks: before running the installer, you can extend API/auth retries and how often the script polls pod readiness. Defaults are tuned for slow clusters (about 50 minutes of auth/token/install-info retries at 5 seconds per attempt; pod-readiness polls every 10 seconds). Override if you need even more, for example:
+For slow registries or flaky networks, **export these before** you run the installer. Defaults are already conservative (roughly ~50 minutes of auth/install polling at 5s steps; pod checks every 10s).
+
+| Variable | Default | Role |
+|----------|---------|------|
+| `RUNAI_INSTALL_WAIT_MAX_ATTEMPTS` | `600` | Auth / install-info retries |
+| `RUNAI_INSTALL_WAIT_SLEEP_SEC` | `5` | Sleep between those attempts |
+| `RUNAI_POD_READY_POLL_SLEEP_SEC` | `10` | Interval for pod-readiness loops |
+| `RUNAI_CLUSTER_INSTALL_MAX_RETRIES` | `10` | Air-gapped re-runs of cluster `install.sh` |
 
 ```sh
-export RUNAI_INSTALL_WAIT_MAX_ATTEMPTS=1200     # default 600
-export RUNAI_INSTALL_WAIT_SLEEP_SEC=10          # seconds between attempts (default 5)
-export RUNAI_POD_READY_POLL_SLEEP_SEC=15        # pod readiness loop interval (default 10)
-export RUNAI_CLUSTER_INSTALL_MAX_RETRIES=15    # air-gapped: re-runs of cluster install.sh (default 10)
+export RUNAI_INSTALL_WAIT_MAX_ATTEMPTS=1200
+export RUNAI_INSTALL_WAIT_SLEEP_SEC=10
+export RUNAI_POD_READY_POLL_SLEEP_SEC=15
+export RUNAI_CLUSTER_INSTALL_MAX_RETRIES=15
 ```
 
-Pod readiness waits for `runai-backend` and `runai` are otherwise unbounded (they only stop when workloads become Ready).
+Waits for `runai-backend` and `runai` readiness are **unbounded** (they end when the workloads become Ready).
