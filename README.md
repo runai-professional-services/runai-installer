@@ -19,7 +19,8 @@ Automates Run:ai on an existing Kubernetes cluster. Optional: install a cluster 
 - [Default access](#default-access)
 - [Reference: all options](#reference-all-options)
 - [Kubernetes cluster install](#kubernetes-cluster-install-kubespray)
-- [Contributing & license](#contributing)
+- [Contributing](#contributing)
+- [Slow image pulls & flaky networks](#slow-image-pulls-flaky-networks)
 
 ---
 
@@ -29,22 +30,23 @@ Automates Run:ai on an existing Kubernetes cluster. Optional: install a cluster 
 - A Kubernetes cluster and working `kubectl`
 - `helm`, `jq`, and `openssl` (for typical installs)
 
-**Slow image pulls or flaky networks:** before running the installer, you can extend API/auth retries and how often the script polls pod readiness. Defaults are tuned for slow clusters (about **50 minutes** of auth/token/install-info retries at **5** seconds per attempt; pod-readiness polls every **10** seconds). Override if you need even more, for example:
-
-```sh
-export RUNAI_INSTALL_WAIT_MAX_ATTEMPTS=1200     # default 600
-export RUNAI_INSTALL_WAIT_SLEEP_SEC=10          # seconds between attempts (default 5)
-export RUNAI_POD_READY_POLL_SLEEP_SEC=15        # pod readiness loop interval (default 10)
-export RUNAI_CLUSTER_INSTALL_MAX_RETRIES=15    # air-gapped: re-runs of cluster install.sh (default 10)
-```
-
-Pod readiness waits for `runai-backend` and `runai` are otherwise unbounded (they only stop when workloads become Ready).
-
 ---
 
 ## 1. Recommended: `--automatic`
 
-Use **`--automatic`** when you want the installer to **prepare the cluster and install Run:ai** in one flow.
+**Start here:** **`--automatic`** is the recommended way to use this installer. It **prepares the cluster and installs Run:ai** in one flow. Pick **either** JFrog (`--repo-secret`) **or** NGC (`--ngc-key` / `NGC_API_KEY`); do **not** mix NGC and JFrog flags on the same command.
+
+```sh
+# JFrog (example: non-interactive)
+./runai-installer.sh --automatic -y --repo-secret ./license.yaml
+```
+
+```sh
+# NGC (example: pass your NVIDIA NGC API key)
+./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY"
+```
+
+### More detail (after you have a first run)
 
 | You provide | Notes |
 |-------------|--------|
@@ -93,12 +95,7 @@ On vanilla Kubernetes, **`--automatic`** deploys **HAProxy Ingress** and binds i
                     └────────────────────────┘
 ```
 
-### `--automatic` examples (start here)
-
-```sh
-# NGC — minimal
-./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY"
-```
+### More `--automatic` examples
 
 ```sh
 # NGC — custom DNS + non-interactive
@@ -110,11 +107,6 @@ On vanilla Kubernetes, **`--automatic`** deploys **HAProxy Ingress** and binds i
 ./runai-installer.sh --automatic --ngc-key "$NGC_API_KEY" \
   --dns runai.example.com \
   --cert /path/to/cert.pem --key /path/to/key.pem --cacert /path/to/rootCA.pem
-```
-
-```sh
-# JFrog
-./runai-installer.sh --automatic -y --repo-secret ./license.yaml
 ```
 
 ```sh
@@ -228,6 +220,7 @@ Not called by `runai-installer.sh`.
 |--------|---------|
 | **`delete-pre-req.sh`** | Removes optional stack: Prometheus, Knative, GPU Operator, HAProxy, Training Operator, NIM Operator, LWS (`-y`, `--dry-run`) |
 | **`dynamo-install.sh`** | Installs NVIDIA AI Dynamo (`dynamo-platform`); default chart pull via HTTPS tarball + NGC key ([Dynamo quickstart](https://docs.nvidia.com/dynamo/dev/getting-started/kubernetes-deployment)) |
+| **`add-inference.sh`** | After `--knative`: TLS secret in `knative-serving`, KnativeServing domain/network (like `tools/knative-external.yaml`), optional HAProxy + `--ip` (`--dns`, `--cert`, `--key`) |
 
 ---
 
@@ -314,3 +307,16 @@ MIT — see [LICENSE](LICENSE).
 ## Acknowledgements
 
 Maintained by Erez Kirson — ekirson@nvidia.com
+
+## Slow image pulls & flaky networks
+
+Slow image pulls or flaky networks: before running the installer, you can extend API/auth retries and how often the script polls pod readiness. Defaults are tuned for slow clusters (about 50 minutes of auth/token/install-info retries at 5 seconds per attempt; pod-readiness polls every 10 seconds). Override if you need even more, for example:
+
+```sh
+export RUNAI_INSTALL_WAIT_MAX_ATTEMPTS=1200     # default 600
+export RUNAI_INSTALL_WAIT_SLEEP_SEC=10          # seconds between attempts (default 5)
+export RUNAI_POD_READY_POLL_SLEEP_SEC=15        # pod readiness loop interval (default 10)
+export RUNAI_CLUSTER_INSTALL_MAX_RETRIES=15    # air-gapped: re-runs of cluster install.sh (default 10)
+```
+
+Pod readiness waits for `runai-backend` and `runai` are otherwise unbounded (they only stop when workloads become Ready).
