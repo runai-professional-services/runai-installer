@@ -8,7 +8,11 @@
 #   ./delete-pre-req.sh -y           # non-interactive
 #   ./delete-pre-req.sh --dry-run    # print actions only
 #
-# Requires: kubectl (current context), helm. jq optional (used to find Prometheus chart releases).
+# Requires: kubectl (current context), helm. jq optional (scans Helm for Prometheus / Knative operator releases).
+#
+# Env (match install modules): TRAINING_OPERATOR_GIT_REF (modules/training.sh),
+#   NIM_OPERATOR_HELM_RELEASE (modules/nim-operator.sh), HAPROXY_NAMESPACE (modules/haproxy.sh),
+#   KNATIVE_OPERATOR_RELEASE / KNATIVE_OPERATOR_NAMESPACE (modules/knative.sh; defaults knative-operator).
 
 set -euo pipefail
 
@@ -21,6 +25,9 @@ NC='\033[0m'
 DRY_RUN=false
 AUTO_YES=false
 TRAINING_OPERATOR_GIT_REF="${TRAINING_OPERATOR_GIT_REF:-v1.9.2}"
+# Same defaults as modules/knative.sh (override if your install used non-defaults).
+KNATIVE_OPERATOR_RELEASE="${KNATIVE_OPERATOR_RELEASE:-knative-operator}"
+KNATIVE_OPERATOR_NAMESPACE="${KNATIVE_OPERATOR_NAMESPACE:-knative-operator}"
 
 usage() {
     echo "Usage: $0 [-y] [--dry-run]"
@@ -122,7 +129,31 @@ uninstall_prometheus_stack() {
     fi
 }
 
-# --- Knative: KnativeServing CR, then operator Helm release, then common namespaces ---
+# --- Knative: same order as a clean teardown — Serving CR first, then operator Helm (see modules/knative.sh) ---
+uninstall_knative_operator_helm_all() {
+    # Install uses: helm upgrade --install "$KNATIVE_OPERATOR_RELEASE" ... -n "$KNATIVE_OPERATOR_NAMESPACE"
+    # chart name in helm list is e.g. knative-operator-1.18.3 — scan so we catch any namespace/release.
+    if command -v jq >/dev/null 2>&1; then
+        local pairs
+        pairs=$(helm list -A -o json 2>/dev/null | jq -r '.[] | select(.chart | startswith("knative-operator")) | "\(.name)\t\(.namespace)"' || true)
+        local found_any=false
+        while IFS=$'\t' read -r rel ns; do
+            [ -z "${rel:-}" ] && continue
+            found_any=true
+            echo -e "${BLUE}Helm uninstall ${rel} (ns ${ns}) [chart knative-operator*]${NC}"
+            run helm uninstall "$rel" -n "$ns" --wait 2>/dev/null || run helm uninstall "$rel" -n "$ns" || true
+        done <<< "$pairs"
+        if [ "$found_any" = false ]; then
+            echo -e "${YELLOW}No Helm releases with chart knative-operator* (helm list -A scan).${NC}"
+        fi
+    else
+        echo -e "${YELLOW}jq not installed: using fixed release ${KNATIVE_OPERATOR_RELEASE} / ns ${KNATIVE_OPERATOR_NAMESPACE} only.${NC}"
+    fi
+    helm_uninstall_if_exists "$KNATIVE_OPERATOR_RELEASE" "$KNATIVE_OPERATOR_NAMESPACE"
+    # Legacy / doc variants
+    helm_uninstall_if_exists knative-operator knative-operator
+}
+
 uninstall_knative() {
     echo -e "${BLUE}=== Knative (operator + Serving) ===${NC}"
     if kubectl get knativeserving knative-serving -n knative-serving >/dev/null 2>&1; then
@@ -132,7 +163,7 @@ uninstall_knative() {
         echo -e "${YELLOW}No KnativeServing knative-serving in knative-serving${NC}"
     fi
 
-    helm_uninstall_if_exists knative-operator knative-operator
+    uninstall_knative_operator_helm_all
 
     for ns in knative-serving knative-operator kourier-system; do
         if kubectl get ns "$ns" >/dev/null 2>&1; then
@@ -144,6 +175,15 @@ uninstall_knative() {
 
 uninstall_gpu_operator() {
     echo -e "${BLUE}=== NVIDIA GPU Operator ===${NC}"
+    if command -v jq >/dev/null 2>&1; then
+        local pairs
+        pairs=$(helm list -A -o json 2>/dev/null | jq -r '.[] | select(.chart | startswith("gpu-operator")) | "\(.name)\t\(.namespace)"' || true)
+        while IFS=$'\t' read -r rel ns; do
+            [ -z "${rel:-}" ] && continue
+            echo -e "${BLUE}Helm uninstall ${rel} (ns ${ns}) [gpu-operator chart]${NC}"
+            run helm uninstall "$rel" -n "$ns" --wait 2>/dev/null || run helm uninstall "$rel" -n "$ns" || true
+        done <<< "$pairs"
+    fi
     helm_uninstall_if_exists gpu-operator gpu-operator
     if [ "$DRY_RUN" != true ] && kubectl get ns gpu-operator >/dev/null 2>&1; then
         if [ -z "$(helm list -n gpu-operator -q 2>/dev/null)" ]; then
@@ -184,6 +224,15 @@ uninstall_training_operator() {
 uninstall_nim_operator() {
     echo -e "${BLUE}=== NVIDIA NIM Operator ===${NC}"
     local rel="${NIM_OPERATOR_HELM_RELEASE:-k8s-nim-operator}"
+    if command -v jq >/dev/null 2>&1; then
+        local pairs
+        pairs=$(helm list -A -o json 2>/dev/null | jq -r '.[] | select(.chart | startswith("k8s-nim-operator")) | "\(.name)\t\(.namespace)"' || true)
+        while IFS=$'\t' read -r r ns; do
+            [ -z "${r:-}" ] && continue
+            echo -e "${BLUE}Helm uninstall ${r} (ns ${ns}) [k8s-nim-operator chart]${NC}"
+            run helm uninstall "$r" -n "$ns" --wait 2>/dev/null || run helm uninstall "$r" -n "$ns" || true
+        done <<< "$pairs"
+    fi
     helm_uninstall_if_exists "$rel" nim-operator
     helm_uninstall_if_exists nim-operator nim-operator
     if [ "$DRY_RUN" != true ] && kubectl get ns nim-operator >/dev/null 2>&1; then
@@ -193,9 +242,18 @@ uninstall_nim_operator() {
     fi
 }
 
-# modules/lws.sh: helm upgrade --install lws ... --namespace lws-system
+# modules/lws.sh: helm upgrade --install lws ... --namespace lws-system (chart version e.g. lws-0.8.0)
 uninstall_lws() {
     echo -e "${BLUE}=== Local Workload Service (LWS) ===${NC}"
+    if command -v jq >/dev/null 2>&1; then
+        local pairs
+        pairs=$(helm list -A -o json 2>/dev/null | jq -r '.[] | select(.chart | startswith("lws-")) | "\(.name)\t\(.namespace)"' || true)
+        while IFS=$'\t' read -r rel ns; do
+            [ -z "${rel:-}" ] && continue
+            echo -e "${BLUE}Helm uninstall ${rel} (ns ${ns}) [lws chart]${NC}"
+            run helm uninstall "$rel" -n "$ns" --wait 2>/dev/null || run helm uninstall "$rel" -n "$ns" || true
+        done <<< "$pairs"
+    fi
     helm_uninstall_if_exists lws lws-system
     if [ "$DRY_RUN" != true ] && kubectl get ns lws-system >/dev/null 2>&1; then
         if [ -z "$(helm list -n lws-system -q 2>/dev/null)" ]; then

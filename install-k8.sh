@@ -15,11 +15,13 @@ show_usage() {
     echo "  --nginx                Include Nginx Ingress Controller"
     echo "  --prometheus           Include Prometheus monitoring stack"
     echo "  --gpu                  Include NVIDIA GPU Operator"
+    echo "  --skip-config          Skip IP selection and auto-generated inventory.ini (edit kubespray/inventory/runai/inventory.ini manually)"
     echo "  -h, --help             Show this help message"
     echo ""
     echo "Examples:"
     echo "  $0                                    # Full installation with all add-ons"
     echo "  $0 --core                             # Core Kubernetes only"
+    echo "  $0 --core --skip-config               # Core install using a manually edited inventory.ini"
     echo "  $0 --addons --nginx --prometheus      # Install add-ons only"
     echo "  $0 --clean                            # Reset cluster"
     echo "  $0 --full --gpu                       # Full installation with GPU support"
@@ -83,26 +85,36 @@ run_part1() {
     # Get hostname
     HOSTNAME=$(hostname)
 
-    # Display IP addresses and get user selection
-    get_ip_addresses
-    echo
-    echo "Please select an IP address by number:"
-    read IP_SELECTION
-
-    # Validate selection
-    while ! validate_ip_selection $IP_SELECTION; do
-        echo "Invalid selection. Please choose a number from the list above:"
+    if [ "$SKIP_CONFIG" = true ]; then
+        echo "Skipping automatic inventory configuration (--skip-config)."
+        if [ ! -f "./inventory/runai/inventory.ini" ]; then
+            echo "❌ Error: inventory/runai/inventory.ini not found."
+            echo "Create or edit it manually before running cluster install."
+            echo "Example: kubespray/inventory/runai/sample/inventory.ini"
+            exit 1
+        fi
+        echo "Using existing inventory: ./inventory/runai/inventory.ini"
+    else
+        # Display IP addresses and get user selection
+        get_ip_addresses
+        echo
+        echo "Please select an IP address by number:"
         read IP_SELECTION
-    done
 
-    # Get the selected IP address
-    SELECTED_IP=$(ip -o addr show | grep 'inet ' | grep -v '127.0.0.1' | awk 'NR=='$IP_SELECTION'{print $4}' | cut -d'/' -f1)
+        # Validate selection
+        while ! validate_ip_selection $IP_SELECTION; do
+            echo "Invalid selection. Please choose a number from the list above:"
+            read IP_SELECTION
+        done
 
-    echo "Selected IP: $SELECTED_IP"
-    echo "Hostname: $HOSTNAME"
+        # Get the selected IP address
+        SELECTED_IP=$(ip -o addr show | grep 'inet ' | grep -v '127.0.0.1' | awk 'NR=='$IP_SELECTION'{print $4}' | cut -d'/' -f1)
 
-    # Create inventory.ini with proper hostname
-    cat > ./inventory/runai/inventory.ini << EOF
+        echo "Selected IP: $SELECTED_IP"
+        echo "Hostname: $HOSTNAME"
+
+        # Create inventory.ini with proper hostname
+        cat > ./inventory/runai/inventory.ini << EOF
 [kube_control_plane]
 ${HOSTNAME}  ansible_host=${HOSTNAME}
 
@@ -113,8 +125,9 @@ kube_control_plane
 ${HOSTNAME}  ansible_host=${HOSTNAME}
 EOF
 
-    echo "Installation configuration completed successfully!"
-    echo "inventory.ini has been created with hostname: $HOSTNAME"
+        echo "Installation configuration completed successfully!"
+        echo "inventory.ini has been created with hostname: $HOSTNAME"
+    fi
 
     # Get current user
     CURRENT_USER=$(whoami)
@@ -460,6 +473,7 @@ INSTALL_NGINX=false
 INSTALL_PROMETHEUS=false
 INSTALL_GPU_OPERATOR=false
 CLEAN_MODE=false
+SKIP_CONFIG=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -490,6 +504,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --clean)
             CLEAN_MODE=true
+            shift
+            ;;
+        --skip-config)
+            SKIP_CONFIG=true
             shift
             ;;
         -h|--help)

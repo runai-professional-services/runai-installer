@@ -17,7 +17,7 @@ unset _runai_wait_helpers_src
 # controlPlaneUrl/_version and must trust TLS for the *Route* hostname (default `*.apps` router).
 # We create runai-ca-cert (same PEM in runai and runai-backend) and keep global.customCA.enabled on the cluster install.
 # Run:ai mounts / uses that secret for in-cluster clients (e.g. HTTPS to the same FQDN) — the label
-# run.ai/cluster-wide=true (applied later) is the product’s “use this CA for the stack”, not OpenShift’s
+# run.ai/cluster-wide=true (after runai pods are ready) is the product’s “use this CA for the stack”, not OpenShift’s
 # cluster-wide /etc/pki. For the whole cluster, admins still configure Cluster Proxy spec.trustedCA
 # (user-ca-bundle) separately if they need that.
 #
@@ -506,14 +506,6 @@ install_runai() {
         exit 1
     fi
 
-    # Label the Run.ai CA certificate secret
-    echo -e "${BLUE}Labeling Run.ai CA certificate secret...${NC}"
-    if log_command "kubectl label secret runai-ca-cert -n runai run.ai/cluster-wide=true run.ai/name=runai-ca-cert --overwrite" "Label Run.ai CA certificate secret"; then
-        echo -e "${GREEN}✅ Run.ai CA certificate secret labeled successfully${NC}"
-    else
-        echo -e "${YELLOW}⚠️ Warning: Failed to label Run.ai CA certificate secret, continuing...${NC}"
-    fi
-
     # Wait for all pods in runai namespace to be ready (recompute each tick; total can
     # increase while Helm rolls out, which previously made "Running > total" and hung)
     echo -e "${BLUE}Waiting for Run.ai cluster pods to be ready...${NC}"
@@ -530,6 +522,26 @@ install_runai() {
         fi
         sleep "$(runai_pod_ready_poll_sleep_sec)"
     done
+
+    echo -e "${BLUE}Labeling Run.ai CA certificate secret...${NC}"
+    if log_command "kubectl label secret runai-ca-cert -n runai run.ai/cluster-wide=true run.ai/name=runai-ca-cert --overwrite" "Label Run.ai CA certificate secret"; then
+        echo -e "${GREEN}✅ Run.ai CA certificate secret labeled successfully${NC}"
+    else
+        echo -e "${YELLOW}⚠️ Warning: Failed to label Run.ai CA certificate secret, continuing...${NC}"
+    fi
+
+    # Run:ai 2.25: ensure wildcard cluster-domain Ingress (*.<DNS_NAME>) matches HAProxy/nginx class from install flags.
+    _runai_subdomain_mod="${RUNAI_INSTALLER_DIR:-}/modules/subdomain.sh"
+    if [ -f "$_runai_subdomain_mod" ]; then
+        # shellcheck source=/dev/null
+        . "$_runai_subdomain_mod" || true
+        if declare -F maybe_apply_runai_225_cluster_domain_star_ingress >/dev/null 2>&1; then
+            if ! maybe_apply_runai_225_cluster_domain_star_ingress; then
+                echo -e "${YELLOW}⚠️ Warning: Run:ai 2.25 cluster-domain star Ingress step failed; see $LOG_FILE${NC}"
+            fi
+        fi
+    fi
+    unset _runai_subdomain_mod
 
     echo -e "${GREEN}✅ Run.ai installation completed successfully!${NC}"
 } 

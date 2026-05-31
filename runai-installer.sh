@@ -125,7 +125,8 @@ show_usage() {
     echo "  --version VER          Alias for --runai-version (useful with --automatic)"
     echo "  --cluster-only         Skip backend installation and only install Run.ai cluster"
     echo "  --internal-dns         Configure internal DNS (requires --ip)"
-    echo "  --ip IP_ADDRESS        Required if --internal-dns, --patch-nginx, or --patch-haproxy is set"
+    echo "  --ip IP_ADDRESS        Required if --internal-dns or --patch-nginx; for HAProxy use --ip and/or --haproxy-external-ips (see below)"
+    echo "  --haproxy-external-ips LIST  Comma-separated Service externalIPs for HAProxy only (optional; overrides --ip for HAProxy when both set). Env: HAPROXY_EXTERNAL_IPS"
     echo "  --cert CERT_FILE       Use provided certificate file instead of generating self-signed"
     echo "  --key KEY_FILE         Use provided key file instead of generating self-signed"
     echo "  --cacert CA_CERT_FILE  Use provided CA certificate file (e.g., rootCA.pem)"
@@ -134,7 +135,7 @@ show_usage() {
     echo "  --nginx                Install Nginx Ingress Controller (no --ip needed)"
     echo "  --patch-nginx          Patch existing Nginx Ingress Controller with external IP (requires --ip)"
     echo "  --haproxy              Install HAProxy Kubernetes Ingress (HAProxyTech; NodePorts 32080/32443)"
-    echo "  --patch-haproxy        Patch HAProxy Ingress service with external IP (requires --ip)"
+    echo "  --patch-haproxy        Patch HAProxy Ingress service with external IP(s) (requires --ip and/or --haproxy-external-ips / HAPROXY_EXTERNAL_IPS)"
     echo "  --use-haproxy          Control plane Helm: --set global.ingress.ingressClass=haproxy (required for vanilla K8s full install; not for --openshift)"
     echo "  --use-nginx            Control plane Helm: --set global.ingress.ingressClass=nginx (required for vanilla K8s full install; not for --openshift)"
     echo "  --openshift            Set global.config.kubernetesDistribution=openshift; set global.domain (default runai.apps.<base>, overridable with --dns); no haproxy/nginx class"
@@ -303,8 +304,8 @@ validate_params() {
         show_usage
     fi
 
-    if [ "$PATCH_HAPROXY" = true ] && [ -z "$IP_ADDRESS" ]; then
-        echo -e "${RED}Error: --ip is required when using --patch-haproxy${NC}"
+    if [ "$PATCH_HAPROXY" = true ] && [ -z "${IP_ADDRESS:-}" ] && [ -z "${HAPROXY_EXTERNAL_IPS:-}" ]; then
+        echo -e "${RED}Error: --ip and/or --haproxy-external-ips (or env HAPROXY_EXTERNAL_IPS) is required when using --patch-haproxy${NC}"
         show_usage
     fi
 
@@ -426,6 +427,7 @@ load_env() {
     AUTOMATIC_CHAIN=${AUTOMATIC_CHAIN:-false}
     AUTOMATIC_STOP_AFTER=${AUTOMATIC_STOP_AFTER:-}
     export AUTOMATIC_STOP_AFTER
+    export HAPROXY_EXTERNAL_IPS="${HAPROXY_EXTERNAL_IPS:-}"
 }
 
 # Function to log commands and their output
@@ -483,6 +485,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --ip)
             IP_ADDRESS="$2"
+            shift 2
+            ;;
+        --haproxy-external-ips)
+            HAPROXY_EXTERNAL_IPS="$2"
+            export HAPROXY_EXTERNAL_IPS
             shift 2
             ;;
         --cert)
@@ -712,6 +719,17 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Comma-separated --ip: treat as HAProxy externalIPs only (not valid for --internal-dns / --patch-nginx).
+if [[ "${IP_ADDRESS:-}" == *","* ]]; then
+    if [ "${INTERNAL_DNS:-false}" = true ] || [ "${PATCH_NGINX:-false}" = true ]; then
+        echo -e "${RED}Error: comma-separated --ip is only supported for HAProxy externalIPs; use a single --ip with --internal-dns or --patch-nginx, and --haproxy-external-ips for multiple HAProxy IPs.${NC}" >&2
+        exit 1
+    fi
+    HAPROXY_EXTERNAL_IPS="$IP_ADDRESS"
+    export HAPROXY_EXTERNAL_IPS
+    IP_ADDRESS=""
+fi
 
 # Incompatible mode pairs (before load_env so unset vars still default safely below)
 # Load environment

@@ -15,6 +15,7 @@
 #   KNATIVE_OPERATOR_HELM_REPO_URL, KNATIVE_OPERATOR_HELM_CHART_VERSION, KNATIVE_SERVING_VERSION
 #   KNATIVE_OPERATOR_HELM_VALUES_FILE  — if set, passed as  -f "$file"  to helm upgrade --install
 #   KNATIVE_SERVING_EXTENDED_RUNAI_CONFIG=true  — add autoscaler + feature flags (legacy YAML installer behavior)
+#   KNATIVE_SERVING_INTERNAL_MANIFEST — path to KnativeServing patch after bootstrap (default: tools/knative-internal.yaml)
 
 KNATIVE_OPERATOR_HELM_REPO_NAME="${KNATIVE_OPERATOR_HELM_REPO_NAME:-knative-operator}"
 KNATIVE_OPERATOR_HELM_REPO_URL="${KNATIVE_OPERATOR_HELM_REPO_URL:-https://knative.github.io/operator}"
@@ -62,6 +63,31 @@ runai_knative_wait_serving_ready() {
         { echo "==== KnativeServing status (debug) ===="; kubectl get knativeserving knative-serving -n knative-serving -o yaml 2>/dev/null | tail -n 120; } >>"$LOG_FILE" 2>/dev/null || true
     fi
     return 1
+}
+
+# Merge internal Serving profile (domain, HA, Kourier ClusterIP, config-features, …) from tools/knative-internal.yaml.
+runai_knative_apply_internal_manifest() {
+    local base_dir install_root src tmp
+    base_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    install_root="${RUNAI_INSTALLER_DIR:-$(cd "$base_dir/.." && pwd)}"
+    src="${KNATIVE_SERVING_INTERNAL_MANIFEST:-$install_root/tools/knative-internal.yaml}"
+    if [ ! -f "$src" ]; then
+        echo -e "${YELLOW}⚠️ Knative internal manifest not found ($src); skipping${NC}" >&2
+        return 0
+    fi
+    tmp="$(mktemp "${TMPDIR:-/tmp}/runai-knative-internal.XXXXXX.yaml")" || return 1
+    if ! sed "s|^  version: .*|  version: \"${KNATIVE_SERVING_VERSION}\"|" "$src" >"$tmp"; then
+        rm -f "$tmp"
+        echo -e "${RED}❌ Failed to prepare Knative internal manifest${NC}" >&2
+        return 1
+    fi
+    if ! log_command "kubectl apply -f \"$tmp\"" "Apply KnativeServing internal profile ($src)"; then
+        rm -f "$tmp"
+        echo -e "${RED}❌ Failed to apply Knative internal manifest${NC}" >&2
+        return 1
+    fi
+    rm -f "$tmp"
+    return 0
 }
 
 # Write KnativeServing CR matching reference cluster, optionally with legacy Run.ai feature overrides.
@@ -152,6 +178,14 @@ install_knative() {
     fi
     rm -f "$cr_file"
 
+    if ! runai_knative_wait_serving_ready 600; then
+        return 1
+    fi
+
+    echo -e "${BLUE}Applying internal KnativeServing profile (tools/knative-internal.yaml)...${NC}"
+    if ! runai_knative_apply_internal_manifest; then
+        return 1
+    fi
     if ! runai_knative_wait_serving_ready 600; then
         return 1
     fi
