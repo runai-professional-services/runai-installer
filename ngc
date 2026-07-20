@@ -1,4 +1,4 @@
-export NGC_API_KEY="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"
+export NGC_API_KEY="nvapi"
 kubectl create secret docker-registry runai-reg-creds \
 --docker-server=https://nvcr.io \
 --docker-username='$oauthtoken' \
